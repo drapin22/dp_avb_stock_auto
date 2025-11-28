@@ -27,10 +27,10 @@ def run_stockd_model(
     result = holdings[["Ticker", "Region"]].copy()
     result["ER_Pct"] = 0.0
 
-    # TODO: înlocuiești bucata de mai jos cu logica REALĂ a modelului tău.
-    # Aici ai acces la:
+    # TODO: aici vei pune logica REALĂ a modelului tău.
+    # Ai acces la:
     #   - ticker, region
-    #   - prices_history (ca să poți calcula factori, volatilități etc.)
+    #   - prices_history (factori, vol, etc.)
     #   - data 'as_of'
     #   - horizon_days
 
@@ -38,9 +38,8 @@ def run_stockd_model(
         ticker = row["Ticker"]
         region = row["Region"]
 
-        # Exemplu de placeholder:
-        # - poți porni cu o formulă simplă și apoi o rafinezi
-        er = 2.0  # <- AICI intră formula ta StockD
+        # Placeholder temporar – îl înlocuim cu formula StockD
+        er = 2.0  # <- AICI intră formula ta
 
         result.at[i, "ER_Pct"] = er
 
