@@ -1,78 +1,43 @@
-from datetime import date
+from datetime import date, timedelta
+
 import pandas as pd
-from stockd import settings
 
 
-# Încarc parametrii din CSV (opțional)
-try:
-    _params_path = settings.DATA_DIR / "stockd_params.csv"
-    _PARAMS = (
-        pd.read_csv(_params_path)
-        .set_index("feature")["beta"]
-        .to_dict()
-    )
-except FileNotFoundError:
-    _PARAMS = {}
-
-
-def _compute_features_for_ticker(
+def _last_n_days_return(
     prices_history: pd.DataFrame,
     ticker: str,
     as_of: date,
-) -> dict | None:
-    """Calculează factorii de care are nevoie modelul pentru un singur ticker."""
-
+    n: int = 20,
+) -> float:
+    """
+    Calculează randamentul %-ual pe ultimele n zile de tranzacționare
+    pentru un ticker, folosind coloanele:
+      - Date (datetime / string)
+      - Ticker
+      - Close
+    """
     if prices_history.empty:
-        return None
+        return 0.0
 
-    df = prices_history[prices_history["Ticker"] == ticker].copy()
-    if df.empty:
-        return None
+    df = prices_history.copy()
+    df["Date"] = pd.to_datetime(df["Date"]).dt.date
 
-    df = df[df["Date"] <= pd.to_datetime(as_of)]
+    # filtrăm doar tickerul respectiv și doar date <= as_of
+    df = df[(df["Ticker"] == ticker) & (df["Date"] <= as_of)]
     df = df.sort_values("Date")
 
-    if len(df) < 21:
-        return None
+    if len(df) < 2:
+        return 0.0
 
-    df["ret"] = df["Close"].pct_change()
+    # luăm ultimele n observații
+    df = df.tail(n)
+    first = df["Close"].iloc[0]
+    last = df["Close"].iloc[-1]
 
-    last_close = df["Close"].iloc[-1]
-    mom_5 = df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1.0
-    mom_20 = df["Close"].iloc[-1] / df["Close"].iloc[-21] - 1.0
-    vol_20 = df["ret"].iloc[-20:].std()
+    if first <= 0:
+        return 0.0
 
-    return {
-        "last_close": last_close,
-        "mom_5": mom_5,
-        "mom_20": mom_20,
-        "vol_20": vol_20,
-    }
-
-
-def _score_from_features(feat: dict, horizon_days: int) -> float:
-    """
-    AICI e formula StockD adevărată.
-    Deocamdată pun coeficienți exemplu – tu îi schimbi.
-    """
-
-    intercept = _PARAMS.get("intercept", 0.0)
-    beta_m5 = _PARAMS.get("mom_5", 0.5)
-    beta_m20 = _PARAMS.get("mom_20", 0.2)
-    beta_vol = _PARAMS.get("vol_20", -0.3)
-
-    raw = (
-        intercept
-        + beta_m5 * feat["mom_5"]
-        + beta_m20 * feat["mom_20"]
-        + beta_vol * feat["vol_20"]
-    )
-
-    scale = horizon_days / 5.0
-    er_pct = raw * 100.0 * scale
-
-    er_pct = max(min(er_pct, 20.0), -20.0)
-    return er_pct
+    return (last / first - 1.0) * 100.0  # în %
 
 
 def run_stockd_model(
@@ -82,26 +47,54 @@ def run_stockd_model(
     horizon_days: int,
 ) -> pd.DataFrame:
     """
-    Interfața oficială a modelului tău StockD.
+    Interfața oficială a modelului StockD.
+
+    Input:
+      - holdings: DataFrame cu cel puțin coloanele ['Ticker', 'Region']
+      - prices_history: toate prețurile istorice (RO + EU + US)
+      - as_of: data la care rulezi modelul (de ex. vineri / duminică)
+      - horizon_days: orizontul pentru care vrei ER (ex: 5 zile)
+
+    Output:
+      - DataFrame cu:
+          ['Ticker', 'Region', 'ER_Pct']
+        unde ER_Pct e expected return % pe orizontul cerut.
     """
 
+    # Copiem coloanele esențiale
     result = holdings[["Ticker", "Region"]].copy()
     result["ER_Pct"] = 0.0
 
+    # ------------------------------------------------------------------
+    # AICI ESTE LOGICA MODELULUI
+    # Momentan: o formulă simplă bazată pe momentum 20d,
+    # scalată la orizontul de 5 zile.
+    # TU poți înlocui bucata asta cu formula ta V10.7F+.
+    # ------------------------------------------------------------------
+
+    base_horizon = 5  # considerăm că V10.7F+ e pe 5 zile
+    scale = horizon_days / base_horizon if base_horizon > 0 else 1.0
+
     for i, row in result.iterrows():
         ticker = row["Ticker"]
+        # poți folosi și row["Region"] dacă ai logici diferite pe RO / EU / US
 
-        feat = _compute_features_for_ticker(
+        # exemplu: momentum pe 20 de zile
+        m20 = _last_n_days_return(
             prices_history=prices_history,
             ticker=ticker,
             as_of=as_of,
+            n=20,
         )
 
-        if feat is None:
-            er = 0.0
-        else:
-            er = _score_from_features(feat, horizon_days=horizon_days)
+        # FOARTE SIMPLIFICAT: ER = 0.5 * momentum_20d, scalat pe orizont
+        er = 0.5 * m20 * scale
 
-        result.at[i, "ER_Pct"] = er
+        # aici poți adăuga și alte semnale:
+        # - volatilitate
+        # - factor value / quality
+        # - ajustare pe bază de risc etc.
+
+        result.at[i, "ER_Pct"] = float(er)
 
     return result
