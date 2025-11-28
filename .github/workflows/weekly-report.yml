@@ -1,0 +1,39 @@
+name: Weekly Performance Report
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 6"  # Saturday 09:00 UTC
+
+jobs:
+  weekly-eval:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run weekly evaluation
+        run: python reports/weekly_eval.py
+
+      - name: Commit weekly report
+        run: |
+          git config --global user.name "StockD Agent"
+          git config --global user.email "agent@stockd.local"
+          git add data/weekly_returns_latest.csv
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else:
+            git commit -m "Weekly returns report"
+            git push
+          fi
