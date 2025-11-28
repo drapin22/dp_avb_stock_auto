@@ -1,0 +1,4 @@
+Ticker,Name,Region,Currency,Active
+AAPL,Apple Inc.,US,USD,1
+MSFT,Microsoft Corporation,US,USD,1
+# adaugă aici Ticker / Name / Active=1 pentru toate companiile US din portofoliu tău
