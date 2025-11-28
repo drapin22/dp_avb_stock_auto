@@ -5,9 +5,17 @@ import pandas as pd
 from stockd import settings
 
 
-def get_week_start(d: date) -> date:
-    # luni din săptămâna respectivă
-    return d - timedelta(days=d.weekday())
+def get_next_monday(d: date) -> date:
+    """
+    Returnează luni-ul următor.
+    Dacă azi e duminică, next_monday = mâine.
+    Dacă azi e marți, next_monday = luni de săptămâna viitoare.
+    """
+    # weekday: Monday=0, Sunday=6
+    days_until_monday = (7 - d.weekday()) % 7
+    if days_until_monday == 0:
+        days_until_monday = 7
+    return d + timedelta(days=days_until_monday)
 
 
 def load_all_holdings() -> pd.DataFrame:
@@ -34,20 +42,19 @@ def load_all_holdings() -> pd.DataFrame:
 
 
 def run_stockd_weekly_model():
-    """Aici se leagă modelul tău StockD de benchmark-ul săptămânal."""
+    """
+    Rulezi asta DUMINICĂ.
+    - Date        = azi (duminică)  -> când a rulat modelul
+    - WeekStart   = luni viitoare   -> săptămâna pentru care facem forecast
+    - TargetDate  = vineri viitoare -> benchmark pe 5 zile
+    """
     today = date.today()
-    week_start = get_week_start(today)
+    week_start = get_next_monday(today)
+    target_date = week_start + timedelta(days=4)  # luni + 4 = vineri
 
-    # pentru claritate, forțăm ca benchmark-ul să fie rulat LUNI
-    if today.weekday() != 0:
-        print(f"[MODEL] Today is {today}, not Monday. "
-              f"Still generating forecasts, WeekStart={week_start}.")
-    else:
-        print(f"[MODEL] Weekly forecast for week starting {week_start}.")
+    print(f"[MODEL] Today = {today}, forecasting week {week_start} – {target_date}")
 
-    # definești orizontul: de ex. 5 zile până vineri
-    horizon_days = 5
-    target_date = today + timedelta(days=horizon_days)
+    horizon_days = (target_date - week_start).days + 1  # 5 zile (L–V)
 
     holdings = load_all_holdings()
     if holdings.empty:
@@ -56,17 +63,17 @@ def run_stockd_weekly_model():
 
     rows = []
 
-    # 🧠 AICI intră modelul tău real:
-    # eu pun un placeholder simplu: ER_Pct = 2% pentru toate
+    # TODO: aici bagi modelul tău real.
+    # Momentan pun un placeholder: +2% pentru toate, ca să fie clar formatul.
     for _, row in holdings.iterrows():
         ticker = row["Ticker"]
         region = row["Region"]
 
-        er_pct = 2.0  # TODO: înlocuiești cu output-ul modelului tău StockD
+        er_pct = 2.0  # înlocuiești cu output-ul StockD pentru ticker + regiune
 
         rows.append(
             {
-                "Date": today.strftime("%Y-%m-%d"),
+                "Date": today.strftime("%Y-%m-%d"),          # când a rulat modelul
                 "WeekStart": week_start.strftime("%Y-%m-%d"),
                 "TargetDate": target_date.strftime("%Y-%m-%d"),
                 "ModelVersion": "StockD_V10.7F+",
@@ -74,7 +81,7 @@ def run_stockd_weekly_model():
                 "Region": region,
                 "HorizonDays": horizon_days,
                 "ER_Pct": er_pct,
-                "Notes": "weekly auto-forecast",
+                "Notes": "weekly auto-forecast for next week",
             }
         )
 
@@ -86,7 +93,6 @@ def run_stockd_weekly_model():
     if forecasts_path.exists():
         old = pd.read_csv(forecasts_path)
         combined = pd.concat([old, new_df], ignore_index=True)
-        # deduplicăm dacă ai rulat de mai multe ori în aceeași zi pentru aceiași tickeri
         combined.drop_duplicates(
             subset=["Date", "Ticker", "TargetDate", "ModelVersion"],
             keep="last",
