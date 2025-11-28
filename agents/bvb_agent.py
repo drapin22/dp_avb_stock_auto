@@ -5,7 +5,9 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+# Unde salvăm istoricul de prețuri
 DATA_PATH = "data/prices_history.csv"
+# Lista de companii românești din portofoliu
 HOLDINGS_RO_PATH = "data/holdings_ro.csv"
 
 
@@ -33,7 +35,7 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
     """
     Ia prețurile de închidere (coloana 'Închidere') pentru tickerele din holdings_ro
     de pe pagina de 'Sumar tranzacționare' BVB (m.bvb.ro).
-    Folosește data curentă implicită a site-ului (fără parametru de dată).
+    Folosește data curentă implicită a site-ului.
     """
     today = datetime.utcnow().date()
     date_str = today.strftime("%Y-%m-%d")
@@ -45,8 +47,17 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
 
     url = "https://m.bvb.ro/tradingandstatistics/trading/historicaltradinginfo"
 
+    # User-Agent de browser mobil, ca să nu fim blocați ca bot
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+            "Mobile/15E148 Safari/604.1"
+        )
+    }
+
     try:
-        resp = requests.get(url, timeout=20)
+        resp = requests.get(url, timeout=20, headers=headers)
         resp.raise_for_status()
     except Exception as e:
         print(f"[RO] HTTP request to BVB failed: {e}")
@@ -71,7 +82,7 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         if symbol not in tickers_ro:
             continue
 
-        # Structura din captură (desktop), adaptată la mobil:
+        # Structura actuală a tabelului (din captura ta):
         # 0 Simbol
         # 1 Piața
         # 2 Nr. tranz.
@@ -108,7 +119,7 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         )
 
     if not rows:
-        print("[RO] Parsed BVB table but found 0 matching tickers from list.")
+        print("[RO] Parsed BVB table but found 0 matching tickers.")
         return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
 
     df = pd.DataFrame(rows)
@@ -117,6 +128,10 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
 
 
 def append_to_csv(df: pd.DataFrame, path: str) -> None:
+    """
+    Adaugă noile prețuri în prices_history.csv, fără să dubleze rânduri
+    pentru aceeași zi / ticker / regiune.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if not os.path.exists(path):
         df.to_csv(path, index=False)
