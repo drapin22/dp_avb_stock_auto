@@ -1,36 +1,38 @@
 name: Weekly Forecast (StockD)
 
 on:
-  schedule:
-    # Duminică seara – ajustează ora (UTC) cum vrei.
-    # Exemplu: 18:00 UTC duminică -> 20:00 în RO iarna.
-    - cron: '0 18 * * 0'
+  # poți porni manual din tab-ul Actions
   workflow_dispatch:
+  # și automat, săptămânal (exemplu: duminică 18:00 UTC)
+  schedule:
+    - cron: "0 18 * * 0"
 
 jobs:
   weekly-forecast:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
       - name: Run weekly StockD model (next week benchmark)
-        run: python -m stockd.model_weekly
+        run: |
+          python -m stockd.model_weekly
 
       - name: Commit forecasts_stockd.csv
         run: |
           git config --global user.name "StockD Agent"
-          git config --global user.email "agent@example.com"
-          git add data/forecasts_stockd.csv
-          if git diff --cached --quiet; then
-            echo "No forecast changes."
-          else:
-            git commit -m "Weekly StockD forecasts"
-            git push
-          fi
+          git config --global user.email "agent@github.com"
+          git add data/forecasts_stockd.csv || echo "No forecasts file to add."
+          git status
+          git commit -m "Weekly forecast update" || echo "Nothing to commit"
+          git push
