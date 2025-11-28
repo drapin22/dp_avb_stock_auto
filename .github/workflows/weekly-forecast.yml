@@ -2,8 +2,9 @@ name: Weekly Forecast (StockD)
 
 on:
   schedule:
-    # Luni dimineață – ajustează ora după fus (ex: 06:00 UTC)
-    - cron: '0 6 * * 1'
+    # Duminică seara – ajustează ora (UTC) cum vrei.
+    # Exemplu: 18:00 UTC duminică -> 20:00 în RO iarna.
+    - cron: '0 18 * * 0'
   workflow_dispatch:
 
 jobs:
@@ -19,7 +20,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Run weekly StockD model
+      - name: Run weekly StockD model (next week benchmark)
         run: python -m stockd.model_weekly
 
       - name: Commit forecasts_stockd.csv
