@@ -1,1 +1,38 @@
+name: Weekly Performance Report
 
+on:
+  schedule:
+    # Vineri seara – după ce piața a închis
+    - cron: '0 20 * * 5'
+  workflow_dispatch:
+
+jobs:
+  weekly-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+
+      - name: Compute weekly performance (all regions)
+        run: python -m analytics.weekly_performance
+
+      - name: Evaluate StockD model vs reality (weekly)
+        run: python -m analytics.model_vs_real
+
+      - name: Commit evaluation reports
+        run: |
+          git config --global user.name "StockD Agent"
+          git config --global user.email "agent@example.com"
+          git add data/model_eval_*.csv
+          if git diff --cached --quiet; then
+            echo "No new evaluation changes."
+          else:
+            git commit -m "Weekly model evaluation"
+            git push
+          fi
