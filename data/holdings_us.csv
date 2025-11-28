@@ -1,4 +1,5 @@
 Ticker,Name,Region,Currency,Active
-AAPL,Apple Inc.,US,USD,1
-MSFT,Microsoft Corporation,US,USD,1
-# adaugă aici Ticker / Name / Active=1 pentru toate companiile US din portofoliu tău
+BABA,Alibaba Group Holding Ltd (ADR),US,USD,1
+JD,JD.com Inc (ADR),US,USD,1
+NIO,NIO Inc (ADR),US,USD,1
+PATH,UiPath Inc,US,USD,1
