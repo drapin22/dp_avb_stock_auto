@@ -1,0 +1,31 @@
+name: Daily Prices Sync
+
+on:
+  schedule:
+    - cron: "15 19 * * 1-5"  # luni-vineri, 19:15 UTC (ajustăm ulterior dacă vrei altă oră)
+  workflow_dispatch:
+
+jobs:
+  fetch-bvb:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run BVB agent
+        run: python agents/bvb_agent.py
+
+      - name: Commit updated prices_history.csv
+        run: |
+          git config --global user.name "StockD Agent"
+          git config --global user.email "agent@stockd.local"
+          git add data/prices_history.csv
+          git commit -m "Daily price update" || echo "No changes to commit"
+          git push
