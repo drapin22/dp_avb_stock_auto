@@ -25,10 +25,35 @@ def load_holdings(path: str, default_region: str) -> pd.DataFrame:
     return df
 
 
+def _extract_close_from_download(data, sym: str):
+    """
+    Extrage coloana 'Close' pentru un simbol din rezultatul yf.download.
+    Funcționează și pentru un singur ticker (Series) și pentru multi-ticker.
+    """
+    if data is None or len(data) == 0:
+        return None
+
+    try:
+        # un singur ticker -> DataFrame cu coloană Close
+        if isinstance(data, pd.DataFrame) and "Close" in data.columns:
+            series = data["Close"]
+        else:
+            # multi-ticker -> data[sym]["Close"]
+            series = data[sym]["Close"]
+
+        series = series.dropna()
+        if series.empty:
+            return None
+        return float(series.iloc[-1])
+    except Exception:
+        return None
+
+
 def fetch_yahoo_closes_for_date(symbols, date: datetime.date) -> dict:
     """
     Ia prețul de închidere pentru o listă de simboluri Yahoo în ziua dată.
-    Folosește o fereastră [date, date+1] ca să prindă time-zone-uri.
+    1) încearcă un download bulk
+    2) pentru fiecare simbol care iese NaN, încearcă un download separat
     """
     if not symbols:
         return {}
@@ -36,9 +61,9 @@ def fetch_yahoo_closes_for_date(symbols, date: datetime.date) -> dict:
     start = date
     end = date + timedelta(days=1)
 
-    print(f"[YF] Downloading prices for {symbols} on {date}.")
+    print(f"[YF] Bulk downloading prices for {symbols} on {date}.")
 
-    data = yf.download(
+    bulk = yf.download(
         tickers=" ".join(symbols),
         start=start.strftime("%Y-%m-%d"),
         end=end.strftime("%Y-%m-%d"),
@@ -48,20 +73,40 @@ def fetch_yahoo_closes_for_date(symbols, date: datetime.date) -> dict:
     )
 
     closes = {}
+
     for sym in symbols:
-        try:
-            if len(symbols) == 1:
-                series = data["Close"]
-            else:
-                series = data[sym]["Close"]
-            val = float(series.dropna().iloc[-1])
-            closes[sym] = val
-        except Exception:
+        # 1) încercăm să extragem din bulk
+        close_val = _extract_close_from_download(bulk, sym)
+
+        # 2) dacă nu există, facem request separat
+        if close_val is None:
+            print(f"[YF] No close in bulk for {sym}, trying single download.")
+            try:
+                single = yf.download(
+                    tickers=sym,
+                    start=start.strftime("%Y-%m-%d"),
+                    end=end.strftime("%Y-%m-%d"),
+                    auto_adjust=False,
+                    progress=False,
+                )
+                close_val = _extract_close_from_download(single, sym)
+            except Exception as e:
+                print(f"[YF] Error downloading {sym} individually: {e}")
+                close_val = None
+
+        if close_val is None:
             print(f"[YF] No close data for {sym} on {date}.")
+        else:
+            closes[sym] = close_val
+
     return closes
 
 
 def append_to_csv(df: pd.DataFrame, path: str) -> None:
+    """
+    Adaugă noile prețuri în prices_history.csv, cu deduplicare
+    pe (Date, Ticker, Region).
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if not os.path.exists(path):
         df.to_csv(path, index=False)
@@ -82,10 +127,17 @@ def main():
     eu = load_holdings(HOLDINGS_EU_PATH, "EU")
     us = load_holdings(HOLDINGS_US_PATH, "US")
 
+    # 2) Încarcă istoricul existent (pentru carry-forward)
+    history = None
+    if os.path.exists(DATA_PATH):
+        history = pd.read_csv(DATA_PATH)
+
     frames = []
-    for region_name, df in [("EU", eu), ("US", us)]:
+
+    # 3) Procesează EU și US
+    for region, df in [("EU", eu), ("US", us)]:
         if df.empty:
-            print(f"[YF] No holdings for region {region_name}.")
+            print(f"[YF] No holdings for region {region}.")
             continue
 
         symbols = df["Ticker"].dropna().unique().tolist()
@@ -94,37 +146,53 @@ def main():
         rows = []
         for _, row in df.iterrows():
             sym = row["Ticker"]
-            if sym not in closes_map:
-                continue
+            currency = row.get("Currency", "EUR" if region == "EU" else "USD")
+
+            # A) Yahoo a dat preț pentru azi
+            if sym in closes_map:
+                close_value = closes_map[sym]
+            else:
+                # B) Yahoo a eșuat → încercăm carry-forward din history
+                close_value = None
+                if history is not None:
+                    prev = history[history["Ticker"] == sym]
+                    if not prev.empty:
+                        close_value = float(prev.iloc[-1]["Close"])
+                        print(f"[YF] Carry-forward for {sym}: {close_value}")
+
+                if close_value is None:
+                    print(f"[YF] No data for {sym} at all. Skipping.")
+                    continue
+
             rows.append(
                 {
                     "Date": date_str,
                     "Ticker": sym,
-                    "Region": row.get("Region", region_name),
-                    "Currency": row.get("Currency", "EUR" if region_name == "EU" else "USD"),
-                    "Close": closes_map[sym],
+                    "Region": region,
+                    "Currency": currency,
+                    "Close": close_value,
                 }
             )
 
         if rows:
             sub_df = pd.DataFrame(rows)
             print(
-                f"[YF] Fetched {len(sub_df)} prices for region {region_name}: "
+                f"[YF] Saved {len(sub_df)} prices for region {region}: "
                 f"{sub_df['Ticker'].tolist()}"
             )
             frames.append(sub_df)
         else:
-            print(f"[YF] No prices fetched for region {region_name}.")
+            print(f"[YF] No prices saved for region {region}.")
 
     if not frames:
-        print("[YF] No data fetched from Yahoo for EU/US today.")
+        print("[YF] No data saved for EU/US today.")
         return
 
-    all_df = pd.concat(frames, ignore_index=True)
-    append_to_csv(all_df, DATA_PATH)
+    full_df = pd.concat(frames, ignore_index=True)
+    append_to_csv(full_df, DATA_PATH)
     print(
-        f"[YF] Saved {len(all_df)} global prices for {date_str} "
-        f"into {DATA_PATH}."
+        f"[YF] Saved {len(full_df)} global prices into {DATA_PATH} "
+        f"for {date_str}."
     )
 
 
