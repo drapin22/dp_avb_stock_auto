@@ -33,6 +33,7 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
     """
     Ia prețurile de închidere (coloana 'Închidere') pentru tickerele din holdings_ro
     de pe pagina de 'Sumar tranzacționare' BVB (m.bvb.ro).
+    Folosește data curentă implicită a site-ului (fără parametru de dată).
     """
     today = datetime.utcnow().date()
     date_str = today.strftime("%Y-%m-%d")
@@ -43,10 +44,9 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
 
     url = "https://m.bvb.ro/tradingandstatistics/trading/historicaltradinginfo"
-    params = {"d": date_str}
 
     try:
-        resp = requests.get(url, params=params, timeout=20)
+        resp = requests.get(url, timeout=20)
         resp.raise_for_status()
     except Exception as e:
         print(f"[RO] HTTP request to BVB failed: {e}")
@@ -71,7 +71,7 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         if symbol not in tickers_ro:
             continue
 
-        # Structura de pe BVB (desktop/mobil) din screenshot:
+        # Structura din captură (desktop), adaptată la mobil:
         # 0 Simbol
         # 1 Piața
         # 2 Nr. tranz.
@@ -81,19 +81,18 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         # 6 Min.
         # 7 Max.
         # 8 Închidere   ← asta ne interesează
-        # 9 Mediu       (sau invers în unele layout-uri)
+        # 9 Mediu
         # 10 Pret ref.
         # 11 Var (%)
-        #
-        # În setup-ul actual, indexul 8 produce prețurile corecte confirmate de tine.
 
         if len(tds) <= 8:
             print(f"[RO] Not enough columns for {symbol}: {tds}")
             continue
 
         raw_close = tds[8]
+        cleaned = raw_close.replace(".", "").replace(",", ".")
         try:
-            close = float(raw_close.replace(".", "").replace(",", "."))
+            close = float(cleaned)
         except ValueError:
             print(f"[RO] Could not parse close for {symbol}: '{raw_close}'")
             continue
@@ -109,14 +108,11 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         )
 
     if not rows:
-        print("[RO] Parsed BVB table but found 0 matching tickers.")
+        print("[RO] Parsed BVB table but found 0 matching tickers from list.")
         return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
 
     df = pd.DataFrame(rows)
-    print(
-        f"[RO] Fetched {len(df)} rows for {date_str}: "
-        f"{df['Ticker'].tolist()}"
-    )
+    print(f"[RO] Fetched {len(df)} rows for {date_str}: {df['Ticker'].tolist()}")
     return df
 
 
@@ -140,10 +136,7 @@ def main() -> None:
         return
 
     append_to_csv(df, DATA_PATH)
-    print(
-        f"[RO] Saved RO prices for {df['Date'].iloc[0]} "
-        f"for {len(df)} tickers."
-    )
+    print(f"[RO] Saved RO prices for {df['Date'].iloc[0]} for {len(df)} tickers.")
 
 
 if __name__ == "__main__":
