@@ -1,43 +1,83 @@
-from datetime import date, timedelta
+# stockd/engine.py
+from __future__ import annotations
+
+from datetime import date
+import json
+from typing import List
 
 import pandas as pd
+from openai import OpenAI
+
+from stockd import settings
+
+client = OpenAI()  # Citește automat OPENAI_API_KEY din env
 
 
-def _last_n_days_return(
+def _build_prompt(
+    holdings: pd.DataFrame,
     prices_history: pd.DataFrame,
-    ticker: str,
     as_of: date,
-    n: int = 20,
-) -> float:
+    horizon_days: int,
+) -> str:
     """
-    Calculează randamentul %-ual pe ultimele n zile de tranzacționare
-    pentru un ticker, folosind coloanele:
-      - Date (datetime / string)
-      - Ticker
-      - Close
+    Construim promptul trimis la model.
+
+    Ideea:
+      - Îi explicăm clar ce vrem: expected return pe următoarele X zile
+      - Îi dăm portofoliul și un mic istoric de prețuri
+      - Îi cerem STRICT JSON, fără text în plus
     """
-    if prices_history.empty:
-        return 0.0
 
-    df = prices_history.copy()
-    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+    # 1) serializăm portofoliul
+    holdings_records = holdings.to_dict(orient="records")
 
-    # filtrăm doar tickerul respectiv și doar date <= as_of
-    df = df[(df["Ticker"] == ticker) & (df["Date"] <= as_of)]
-    df = df.sort_values("Date")
+    # 2) reducem un pic istoria, să nu fie monstru
+    #    luăm ultimele 60 de zile pentru tickerele din holdings
+    tickers = sorted(set(holdings["Ticker"]))
+    recent = prices_history[prices_history["Ticker"].isin(tickers)].copy()
+    if not recent.empty:
+        cutoff = recent["Date"].max() - pd.Timedelta(days=60)
+        recent = recent[recent["Date"] >= cutoff]
+        recent["Date"] = recent["Date"].dt.strftime("%Y-%m-%d")
 
-    if len(df) < 2:
-        return 0.0
+    price_records = recent.sort_values(["Ticker", "Date"]).to_dict(orient="records")
 
-    # luăm ultimele n observații
-    df = df.tail(n)
-    first = df["Close"].iloc[0]
-    last = df["Close"].iloc[-1]
+    prompt = f"""
+You are STOCKD, a systematic portfolio model.
 
-    if first <= 0:
-        return 0.0
+Today is {as_of.isoformat()}.
+You must generate an EXPECTED RETURN forecast for each holding over the NEXT {horizon_days} calendar days
+(roughly one trading week, Monday to Friday).
 
-    return (last / first - 1.0) * 100.0  # în %
+Holdings (each object has Ticker and Region):
+{json.dumps(holdings_records, indent=2)}
+
+Recent prices for these tickers (Date, Ticker, Region, Currency, Close):
+{json.dumps(price_records, indent=2)}
+
+TASK:
+- For every holding in the list, estimate the expected percentage return ER_Pct
+  over the next {horizon_days} days.
+- You can use trend, volatility, mean reversion, cross-sectional patterns, etc.
+- Keep numbers relatively small and realistic (usually between -10 and +10).
+
+OUTPUT:
+Return ONLY valid JSON with this exact structure:
+
+{{
+  "forecasts": [
+    {{"Ticker": "WINE", "Region": "RO", "ER_Pct": 2.5}},
+    {{"Ticker": "BABA", "Region": "US", "ER_Pct": -1.2}}
+  ]
+}}
+
+Rules:
+- Include ALL tickers from the holdings list, no extra tickers.
+- ER_Pct is a float, not a string.
+- Do NOT add any explanation text outside the JSON object.
+""".strip()
+
+    return prompt
 
 
 def run_stockd_model(
@@ -49,52 +89,75 @@ def run_stockd_model(
     """
     Interfața oficială a modelului StockD.
 
-    Input:
-      - holdings: DataFrame cu cel puțin coloanele ['Ticker', 'Region']
-      - prices_history: toate prețurile istorice (RO + EU + US)
-      - as_of: data la care rulezi modelul (de ex. vineri / duminică)
-      - horizon_days: orizontul pentru care vrei ER (ex: 5 zile)
-
-    Output:
-      - DataFrame cu:
-          ['Ticker', 'Region', 'ER_Pct']
-        unde ER_Pct e expected return % pe orizontul cerut.
+    Returnează DataFrame cu coloanele:
+      ['Ticker', 'Region', 'ER_Pct']
     """
 
-    # Copiem coloanele esențiale
-    result = holdings[["Ticker", "Region"]].copy()
-    result["ER_Pct"] = 0.0
+    if holdings.empty:
+        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
 
-    # ------------------------------------------------------------------
-    # AICI ESTE LOGICA MODELULUI
-    # Momentan: o formulă simplă bazată pe momentum 20d,
-    # scalată la orizontul de 5 zile.
-    # TU poți înlocui bucata asta cu formula ta V10.7F+.
-    # ------------------------------------------------------------------
+    prompt = _build_prompt(
+        holdings=holdings,
+        prices_history=prices_history,
+        as_of=as_of,
+        horizon_days=horizon_days,
+    )
 
-    base_horizon = 5  # considerăm că V10.7F+ e pe 5 zile
-    scale = horizon_days / base_horizon if base_horizon > 0 else 1.0
-
-    for i, row in result.iterrows():
-        ticker = row["Ticker"]
-        # poți folosi și row["Region"] dacă ai logici diferite pe RO / EU / US
-
-        # exemplu: momentum pe 20 de zile
-        m20 = _last_n_days_return(
-            prices_history=prices_history,
-            ticker=ticker,
-            as_of=as_of,
-            n=20,
+    try:
+        response = client.responses.create(
+            model=settings.MODEL_NAME,
+            input=prompt,
+            # forțăm JSON valid
+            response_format={"type": "json_object"},
         )
+    except Exception as exc:
+        # În caz că pică API-ul: fallback ER=0
+        print(f"[STOCKD] ERROR calling OpenAI: {exc}")
+        result = holdings[["Ticker", "Region"]].copy()
+        result["ER_Pct"] = 0.0
+        return result
 
-        # FOARTE SIMPLIFICAT: ER = 0.5 * momentum_20d, scalat pe orizont
-        er = 0.5 * m20 * scale
+    # Extragem textul răspunsului
+    try:
+        # Noua API Responses: textul e în output[0].content[0].text
+        raw_text = response.output[0].content[0].text
+    except Exception:
+        # Dacă structura se schimbă, mai bine log + fallback
+        print("[STOCKD] WARNING: unexpected response structure, using fallback ER=0.")
+        result = holdings[["Ticker", "Region"]].copy()
+        result["ER_Pct"] = 0.0
+        return result
 
-        # aici poți adăuga și alte semnale:
-        # - volatilitate
-        # - factor value / quality
-        # - ajustare pe bază de risc etc.
+    try:
+        data = json.loads(raw_text)
+        forecasts = data.get("forecasts", [])
+    except Exception as exc:
+        print(f"[STOCKD] ERROR parsing JSON from model: {exc}")
+        forecasts = []
 
-        result.at[i, "ER_Pct"] = float(er)
+    if not forecasts:
+        # fallback: 0 pentru toți, dar păstrăm pipe-ul viu
+        print("[STOCKD] WARNING: empty forecasts, defaulting to ER_Pct = 0.")
+        result = holdings[["Ticker", "Region"]].copy()
+        result["ER_Pct"] = 0.0
+        return result
 
-    return result
+    df = pd.DataFrame(forecasts)
+
+    # Normalizăm și ne asigurăm că avem coloanele corecte
+    if "Ticker" not in df.columns or "Region" not in df.columns:
+        raise ValueError("Model response must contain 'Ticker' and 'Region' keys.")
+
+    if "ER_Pct" not in df.columns:
+        df["ER_Pct"] = 0.0
+
+    df["ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce").fillna(0.0)
+
+    # ne limităm la tickerele efective din holdings și facem merge
+    df = df[["Ticker", "Region", "ER_Pct"]]
+    merged = holdings[["Ticker", "Region"]].merge(
+        df, on=["Ticker", "Region"], how="left"
+    )
+    merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
+
+    return merged
