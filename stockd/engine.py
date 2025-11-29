@@ -8,13 +8,12 @@ from openai import OpenAI
 
 from stockd import settings
 
-client = OpenAI()   # folosește OPENAI_API_KEY din secrets
+client = OpenAI()   # ia cheia din secret
 
 
 def _build_prompt(holdings, prices_history, as_of, horizon_days):
     holdings_records = holdings.to_dict(orient="records")
 
-    # limităm la 60 zile
     tickers = sorted(set(holdings["Ticker"]))
     recent = prices_history[prices_history["Ticker"].isin(tickers)].copy()
     if not recent.empty:
@@ -25,27 +24,20 @@ def _build_prompt(holdings, prices_history, as_of, horizon_days):
     price_records = recent.to_dict(orient="records")
 
     prompt = f"""
-You are STOCKD, a systematic forecast model.
+You are STOCKD, a systematic forecasting model.
 Date today: {as_of.isoformat()}.
 
-Your task:
-Predict the expected return (ER_Pct) for EACH ticker over the next {horizon_days} days.
-Output MUST be JSON ONLY.
+Forecast expected return for each ticker for the next {horizon_days} days.
+
+Return ONLY valid JSON matching the schema.
 
 Holdings:
 {json.dumps(holdings_records, indent=2)}
 
-Recent prices:
+Recent prices (last 60 days):
 {json.dumps(price_records, indent=2)}
-
-Return ONLY:
-{{
-  "forecasts": [
-    {{"Ticker": "WINE", "Region": "RO", "ER_Pct": 1.2}},
-    {{"Ticker": "BABA", "Region": "US", "ER_Pct": -0.4}}
-  ]
-}}
 """
+
     return prompt.strip()
 
 
@@ -61,53 +53,56 @@ def run_stockd_model(
 
     prompt = _build_prompt(holdings, prices_history, as_of, horizon_days)
 
-    # NOU! — folosim Responses.parse pentru JSON
+    # JSON Schema VALID pentru Responses
+    schema = {
+        "name": "stockd_output",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "forecasts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "Ticker": {"type": "string"},
+                            "Region": {"type": "string"},
+                            "ER_Pct": {"type": "number"}
+                        },
+                        "required": ["Ticker", "Region", "ER_Pct"]
+                    }
+                }
+            },
+            "required": ["forecasts"]
+        }
+    }
+
     try:
-        resp = client.responses.parse(
+        response = client.responses.create(
             model=settings.MODEL_NAME,
             input=prompt,
-            # îi spunem explicit că vrem JSON
-            output_format={"type": "json", "schema": {
-                "type": "object",
-                "properties": {
-                    "forecasts": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "Ticker": {"type": "string"},
-                                "Region": {"type": "string"},
-                                "ER_Pct": {"type": "number"}
-                            },
-                            "required": ["Ticker", "Region", "ER_Pct"]
-                        }
-                    }
-                },
-                "required": ["forecasts"]
-            }}
+            response_format={
+                "type": "json_schema",
+                "json_schema": schema
+            },
+            max_output_tokens=1200
         )
 
-        parsed = resp.output_parsed
+        # scoatem JSON-ul
+        raw_json = response.output[0].content[0].text
+        parsed = json.loads(raw_json)
         forecasts = parsed["forecasts"]
 
     except Exception as exc:
-        # fallback: ER=0
         print(f"[STOCKD] ERROR calling OpenAI: {exc}")
-        fallback = holdings.copy()
-        fallback["ER_Pct"] = 0.0
-        return fallback[["Ticker", "Region", "ER_Pct"]]
+        # fallback: 0%
+        fb = holdings.copy()
+        fb["ER_Pct"] = 0.0
+        return fb[["Ticker", "Region", "ER_Pct"]]
 
     df = pd.DataFrame(forecasts)
-
-    if df.empty:
-        fallback = holdings.copy()
-        fallback["ER_Pct"] = 0.0
-        return fallback
-
     df["ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce").fillna(0.0)
 
-    # match exact holdings order
-    final = holdings.merge(df, on=["Ticker", "Region"], how="left")
-    final["ER_Pct"] = final["ER_Pct"].fillna(0.0)
+    merged = holdings.merge(df, on=["Ticker", "Region"], how="left")
+    merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
 
-    return final[["Ticker", "Region", "ER_Pct"]]
+    return merged[["Ticker", "Region", "ER_Pct"]]
