@@ -8,14 +8,27 @@ from openai import OpenAI
 
 from stockd import settings
 
-client = OpenAI()   # ia cheia din secret
+# Cheia e citită automat din variabila de mediu OPENAI_API_KEY
+client = OpenAI()
 
 
-def _build_prompt(holdings, prices_history, as_of, horizon_days):
+def _build_prompt(holdings: pd.DataFrame,
+                  prices_history: pd.DataFrame,
+                  as_of: date,
+                  horizon_days: int) -> str:
+    """
+    Construiește promptul trimis către model.
+    Îi dăm:
+      - lista de dețineri
+      - ultimele ~60 de zile de prețuri pentru acele tickere
+    și îi cerem STRICT un JSON cu forecasts.
+    """
+
     holdings_records = holdings.to_dict(orient="records")
 
     tickers = sorted(set(holdings["Ticker"]))
     recent = prices_history[prices_history["Ticker"].isin(tickers)].copy()
+
     if not recent.empty:
         cutoff = recent["Date"].max() - pd.Timedelta(days=60)
         recent = recent[recent["Date"] >= cutoff]
@@ -24,20 +37,45 @@ def _build_prompt(holdings, prices_history, as_of, horizon_days):
     price_records = recent.to_dict(orient="records")
 
     prompt = f"""
-You are STOCKD, a systematic forecasting model.
-Date today: {as_of.isoformat()}.
+You are STOCKD, a systematic forecasting model for stocks.
 
-Forecast expected return for each ticker for the next {horizon_days} days.
+Today is {as_of.isoformat()}.
+You must forecast the expected percentage return (ER_Pct) for each ticker
+for the NEXT {horizon_days} calendar days (typically a 5-day trading week).
 
-Return ONLY valid JSON matching the schema.
-
-Holdings:
+INPUT DATA
+----------
+Holdings (current portfolio positions):
 {json.dumps(holdings_records, indent=2)}
 
-Recent prices (last 60 days):
+Recent daily prices for these tickers (last ~60 days):
 {json.dumps(price_records, indent=2)}
-"""
 
+REQUIREMENTS
+------------
+1. Think using your own internal reasoning, but DO NOT include that reasoning
+   in the final answer.
+2. The ONLY thing you are allowed to output is a single JSON object
+   that matches exactly this schema:
+
+{{
+  "forecasts": [
+    {{
+      "Ticker": "STRING (one of the tickers from Holdings)",
+      "Region": "STRING (RO / EU / US)",
+      "ER_Pct": NUMBER   // expected total return over the horizon, in percent
+    }},
+    ...
+  ]
+}}
+
+3. Include ALL tickers from Holdings in the forecasts list.
+4. Do NOT wrap the JSON in markdown.
+5. Do NOT add any extra keys, comments, or text outside the JSON.
+6. ER_Pct can be negative or positive (e.g. -3.5, 0.0, 4.2).
+
+Return ONLY that JSON object.
+"""
     return prompt.strip()
 
 
@@ -47,62 +85,68 @@ def run_stockd_model(
     as_of: date,
     horizon_days: int,
 ) -> pd.DataFrame:
+    """
+    Rulează modelul STOCKD (bazat pe OpenAI) și întoarce un DataFrame cu:
+      ['Ticker', 'Region', 'ER_Pct'].
+
+    Dacă ceva eșuează la apelul OpenAI sau la parsarea JSON,
+    întoarce fallback cu ER_Pct = 0.0 pentru toate tickerele.
+    """
 
     if holdings.empty:
         return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
 
     prompt = _build_prompt(holdings, prices_history, as_of, horizon_days)
 
-    # JSON Schema VALID pentru Responses
-    schema = {
-        "name": "stockd_output",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "forecasts": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "Ticker": {"type": "string"},
-                            "Region": {"type": "string"},
-                            "ER_Pct": {"type": "number"}
-                        },
-                        "required": ["Ticker", "Region", "ER_Pct"]
-                    }
-                }
-            },
-            "required": ["forecasts"]
-        }
-    }
-
     try:
-        response = client.responses.create(
+        # Apelăm endpointul clasic de chat, fără response_format,
+        # ca să fim compatibili cu orice versiune de librărie.
+        response = client.chat.completions.create(
             model=settings.MODEL_NAME,
-            input=prompt,
-            response_format={
-                "type": "json_schema",
-                "json_schema": schema
-            },
-            max_output_tokens=1200
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            temperature=0.0,
+            max_tokens=1200,
         )
 
-        # scoatem JSON-ul
-        raw_json = response.output[0].content[0].text
-        parsed = json.loads(raw_json)
-        forecasts = parsed["forecasts"]
+        # Extragem textul brut trimis de model
+        content = response.choices[0].message.content
+        # Încercăm să parsăm direct ca JSON
+        parsed = json.loads(content)
+        forecasts = parsed.get("forecasts", [])
+
+        if not isinstance(forecasts, list):
+            raise ValueError("`forecasts` is not a list in model output")
 
     except Exception as exc:
-        print(f"[STOCKD] ERROR calling OpenAI: {exc}")
-        # fallback: 0%
+        print(f"[STOCKD] ERROR calling/parsing OpenAI response: {exc}")
+        # Fallback sigur: 0% ER pentru toate tickerele
         fb = holdings.copy()
         fb["ER_Pct"] = 0.0
         return fb[["Ticker", "Region", "ER_Pct"]]
 
+    # Construim DataFrame din JSON
     df = pd.DataFrame(forecasts)
+
+    # Ne asigurăm că avem coloanele necesare
+    for col in ["Ticker", "Region", "ER_Pct"]:
+        if col not in df.columns:
+            df[col] = None
+
     df["ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce").fillna(0.0)
 
-    merged = holdings.merge(df, on=["Ticker", "Region"], how="left")
+    # Facem merge cu holdings ca să nu pierdem nimic și să avem exact
+    # aceiași tickeri / regiuni ca în portofoliu
+    merged = holdings.merge(
+        df[["Ticker", "Region", "ER_Pct"]],
+        on=["Ticker", "Region"],
+        how="left",
+    )
+
     merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
 
     return merged[["Ticker", "Region", "ER_Pct"]]
