@@ -105,7 +105,8 @@ def run_stockd_weekly_model() -> None:
       - încarcă holdings + prices_history
       - cheamă run_stockd_model (OpenAI)
       - salvează predicțiile în data/forecasts_stockd.csv
-      - trimite un rezumat pe Telegram cu top 5 ER
+      - trimite un rezumat pe Telegram cu TOATE tickerele:
+          Ticker, Region, Preț curent, ER%, Preț țintă
     """
     today = date.today()
     week_start = get_next_monday(today)
@@ -186,21 +187,46 @@ def run_stockd_weekly_model() -> None:
 
     print(f"[MODEL] Saved {len(new_df)} weekly forecasts to {forecasts_path}.")
 
-    # 6. Trimitem un rezumat pe Telegram (Top 5 ER)
+    # === 6. Pregătim datele pentru mesajul de Telegram ===
     try:
-        top = new_df.sort_values("ER_Pct", ascending=False).head(5)
+        # Ultimul preț pentru fiecare (Ticker, Region)
+        if prices_history.empty:
+            latest = pd.DataFrame(
+                columns=["Ticker", "Region", "Close"]
+            ).set_index(["Ticker", "Region"])
+        else:
+            latest = (
+                prices_history.sort_values("Date")
+                .groupby(["Ticker", "Region"])
+                .tail(1)
+                .set_index(["Ticker", "Region"])
+            )
 
         lines = [
             "📈 StockD weekly forecast",
             f"Săptămână: {week_start} → {target_date}",
             "",
-            "Top 5 ER (next 5 days):",
+            "Ticker (Reg) | Price → Target | ER%",
         ]
 
-        for _, r in top.iterrows():
-            lines.append(
-                f"- {r['Ticker']} ({r['Region']}): {r['ER_Pct']:.2f}%"
-            )
+        # sortăm frumos pe regiune și ticker
+        for _, r in new_df.sort_values(["Region", "Ticker"]).iterrows():
+            key = (r["Ticker"], r["Region"])
+            er = float(r["ER_Pct"])
+            if key in latest.index:
+                price = float(latest.loc[key, "Close"])
+                target_price = price * (1.0 + er / 100.0)
+                lines.append(
+                    f"- {r['Ticker']} ({r['Region']}): "
+                    f"{price:.2f} → {target_price:.2f} "
+                    f"({er:.2f}%)"
+                )
+            else:
+                # dacă nu avem preț, tot vrem să vedem ER-ul
+                lines.append(
+                    f"- {r['Ticker']} ({r['Region']}): "
+                    f"no price, ER {er:.2f}%"
+                )
 
         msg = "\n".join(lines)
         send_telegram_message(msg)
