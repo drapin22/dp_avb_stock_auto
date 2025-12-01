@@ -2,8 +2,8 @@ name: Weekly Forecast (StockD)
 
 on:
   schedule:
-    # duminica la 18:00 UTC (ajustezi cum vrei)
-    - cron: "0 18 * * 0"
+    # Duminică la 09:00 UTC ~ 10:00 în Olanda (CET)
+    - cron: "0 9 * * 0"
   workflow_dispatch:
 
 jobs:
