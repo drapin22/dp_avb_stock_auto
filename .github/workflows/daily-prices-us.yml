@@ -1,32 +1,38 @@
 name: Daily Prices US
 
 on:
+  # 21:00 UTC ≈ 23:00 România (cât timp nu avem schimbări de fus complicate)
   schedule:
-    - cron: "20 21 * * 1-5"  # 21:20 UTC = 22:20 CET
+    - cron: "0 21 * * 1-5"
   workflow_dispatch:
 
 jobs:
-  fetch-us:
+  daily-prices-us:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
       - name: Fetch US prices
-        run: python stockd/run_daily.py --regions US
-
-      - name: Commit changes
         run: |
-          git config user.name "StockD Agent"
-          git config user.email "agent@users.noreply.github.com"
-          git add data/prices_history.csv
-          git commit -m "Daily US price update" || echo "No changes"
+          export PYTHONPATH=$PYTHONPATH:${{ github.workspace }}
+          python stockd/run_daily.py --regions US
+
+      - name: Commit updated prices_history.csv
+        run: |
+          git config --global user.name "StockD Agent"
+          git config --global user.email "agent@stockd.ai"
+
+          git add data/prices_history.csv || true
+          git commit -m "Daily US price update" || echo "No changes to commit"
           git push
