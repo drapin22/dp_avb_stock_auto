@@ -5,3 +5,4 @@ openpyxl
 yfinance
 openai>=1.55.0
 python-dateutil
+matplotlib
