@@ -1,11 +1,15 @@
-name: Daily US prices (Yahoo)
+name: Daily US Prices
 
 on:
   schedule:
-    # Exemplu: 22:30 UTC în zilele lucrătoare (≈ în jurul închiderii pieței US)
-    # Ajustează dacă vrei altă oră.
-    - cron: "30 22 * * 1-5"
+    # 21:05 UTC ≈ 23:05 în România (EET) Luni–Vineri
+    # aprox. după închiderea pieței US
+    - cron: "5 21 * * 1-5"
   workflow_dispatch:
+
+concurrency:
+  group: daily-prices
+  cancel-in-progress: false
 
 jobs:
   fetch-us:
@@ -22,18 +26,19 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Set PYTHONPATH
-        run: |
-          echo "PYTHONPATH=$PYTHONPATH:${{ github.workspace }}" >> $GITHUB_ENV
 
       - name: Fetch US prices
         run: |
+          export PYTHONPATH="$PYTHONPATH:$(pwd)"
           python stockd/run_daily.py --regions US
 
       - name: Commit updated prices_history.csv
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Daily US price update"
-          file_pattern: "data/prices_history.csv"
+          commit_message: "Daily prices update (US)"
+          commit_user_name: "StockD Agent"
+          commit_user_email: "stockd@bot.com"
+          file_pattern: data/prices_history.csv
+          pull_strategy: "pull"
