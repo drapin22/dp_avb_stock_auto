@@ -1,182 +1,296 @@
+# stockd/weekly_report.py
+from __future__ import annotations
+
+import io
 import os
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import requests
 
-from stockd.telegram_utils import (
-    send_telegram_message,
-    send_telegram_document,
-    send_telegram_photo,
-)
-
-REPORT_DIR = "data/weekly_report"
-FORECAST_FILE = "data/forecasts_stockd.csv"
-PRICES_FILE = "data/prices_history.csv"
-
-os.makedirs(REPORT_DIR, exist_ok=True)
+from stockd import settings
 
 
-def load_data():
-    forecast = pd.read_csv(FORECAST_FILE)
-    prices = pd.read_csv(PRICES_FILE)
-    prices["Date"] = pd.to_datetime(prices["Date"])
-    return forecast, prices
+FORECASTS_PATH = settings.DATA_DIR / "forecasts_stockd.csv"
+PRICES_PATH = settings.PRICES_HISTORY
+
+# Optional env vars pentru Telegram
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 
-def compute_weekly_returns(prices, start_date, end_date):
-    tickers = prices["Ticker"].unique()
-    rows = []
-
-    for t in tickers:
-        df = prices[prices["Ticker"] == t].sort_values("Date")
-
-        w_open = df[df["Date"] == start_date]
-        w_close = df[df["Date"] == end_date]
-
-        if w_open.empty or w_close.empty:
-            continue
-
-        open_p = float(w_open["Close"].iloc[0])
-        close_p = float(w_close["Close"].iloc[0])
-        ret = (close_p - open_p) / open_p * 100.0
-
-        region = df["Region"].iloc[0]
-
-        rows.append(
-            {
-                "Ticker": t,
-                "Region": region,
-                "Open": open_p,
-                "Close": close_p,
-                "Real_Return_Pct": ret,
-            }
-        )
-
-    return pd.DataFrame(rows)
+@dataclass
+class WeeklyReportInfo:
+    week_start: date
+    target_date: date
+    csv_path: Path
+    xlsx_path: Path
+    plot_path: Path
+    n_forecasts: int
+    n_with_real: int
 
 
-def generate_plot(df: pd.DataFrame, output_path: str) -> None:
+# ----------------- UTILITARE DE ÎNCĂRCARE -----------------
+
+
+def _load_forecasts() -> pd.DataFrame:
+    if not FORECASTS_PATH.exists():
+        raise FileNotFoundError(f"Forecast file not found: {FORECASTS_PATH}")
+
+    df = pd.read_csv(FORECASTS_PATH)
     if df.empty:
-        return
+        raise ValueError("Forecast file is empty.")
 
-    df_sorted = df.sort_values("Error_Pct")
-
-    plt.figure(figsize=(12, 8))
-    plt.barh(df_sorted["Ticker"], df_sorted["Error_Pct"])
-    plt.title("Eroare predicție vs randament real (pct)")
-    plt.xlabel("Eroare (puncte procentuale)")
-    plt.grid(True, axis="x", alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
+    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+    df["WeekStart"] = pd.to_datetime(df["WeekStart"]).dt.date
+    df["TargetDate"] = pd.to_datetime(df["TargetDate"]).dt.date
+    return df
 
 
-def build_text_summary(df: pd.DataFrame, week_start, week_end) -> str:
+def _load_prices() -> pd.DataFrame:
+    if not PRICES_PATH.exists():
+        raise FileNotFoundError(f"Prices file not found: {PRICES_PATH}")
+
+    df = pd.read_csv(PRICES_PATH)
     if df.empty:
-        return (
-            f"Raport săptămânal StockD {week_start} – {week_end}\n"
-            f"Nu am putut calcula randamentele (lipsesc date de preț)."
-        )
+        raise ValueError("Prices file is empty.")
 
-    df2 = df.copy()
-    df2 = df2[["Ticker", "Region", "ER_Pct", "Real_Return_Pct", "Error_Pct"]]
-
-    df2["ER_Pct"] = df2["ER_Pct"].round(2)
-    df2["Real_Return_Pct"] = df2["Real_Return_Pct"].round(2)
-    df2["Error_Pct"] = df2["Error_Pct"].round(2)
-
-    top = df2.sort_values("Error_Pct").head(5)
-
-    lines = [
-        f"Raport săptămânal StockD {week_start} – {week_end}",
-        "",
-        "Primele 5 poziții după eroare (Real − Predicție, pct):",
-    ]
-
-    for _, row in top.iterrows():
-        lines.append(
-            f"- {row['Ticker']} ({row['Region']}): "
-            f"predicție {row['ER_Pct']} pct, "
-            f"real {row['Real_Return_Pct']} pct, "
-            f"eroare {row['Error_Pct']} pct"
-        )
-
-    return "\n".join(lines)
+    df["Date"] = pd.to_datetime(df["Date"]).dt.date
+    return df
 
 
-def run_report():
-    # calculăm săptămâna anterioară: luni-vineri
-    today = date.today()
-    last_sunday = today - timedelta(days=today.weekday() + 1)
-    week_start = last_sunday + timedelta(days=1)  # luni
-    week_end = week_start + timedelta(days=4)     # vineri
+# ----------------- LOGICĂ: RANDAMENT REAL SĂPTĂMÂNĂ -----------------
 
-    print(f"[REPORT] Week = {week_start} -> {week_end}")
 
-    forecast, prices = load_data()
+def _compute_weekly_returns(
+    prices: pd.DataFrame,
+    week_start: date,
+    target_date: date,
+) -> pd.DataFrame:
+    """
+    Calculează randamentul REAL pe săptămână:
+        Realized_Pct = (ultima_cotație / prima_cotație - 1) * 100
+    pentru fiecare (Ticker, Region) în intervalul [week_start, target_date].
+    """
 
-    # forecast-ul generat duminica pentru această săptămână
-    f_week = forecast[forecast["WeekStart"] == str(week_start)]
-    if f_week.empty:
-        raise ValueError(f"No forecasts found for WeekStart={week_start}")
+    mask = (prices["Date"] >= week_start) & (prices["Date"] <= target_date)
+    df = prices.loc[mask].copy()
 
-    returns = compute_weekly_returns(
-        prices,
-        pd.to_datetime(week_start),
-        pd.to_datetime(week_end),
+    if df.empty:
+        # întoarcem frame gol dar cu coloanele corecte
+        return pd.DataFrame(columns=["Ticker", "Region", "Realized_Pct"])
+
+    # Sortăm pentru a putea lua first/last corect
+    df.sort_values(["Ticker", "Region", "Date"], inplace=True)
+
+    first = (
+        df.groupby(["Ticker", "Region"])
+        .first()
+        .reset_index()[["Ticker", "Region", "Close"]]
+        .rename(columns={"Close": "StartPrice"})
     )
 
+    last = (
+        df.groupby(["Ticker", "Region"])
+        .last()
+        .reset_index()[["Ticker", "Region", "Close"]]
+        .rename(columns={"Close": "EndPrice"})
+    )
+
+    merged = first.merge(last, on=["Ticker", "Region"], how="inner")
+    merged["Realized_Pct"] = (merged["EndPrice"] / merged["StartPrice"] - 1.0) * 100.0
+
+    return merged[["Ticker", "Region", "Realized_Pct"]]
+
+
+# ----------------- GENERARE RAPORT + GRAFIC -----------------
+
+
+def run_report(today: Optional[date] = None) -> WeeklyReportInfo:
+    if today is None:
+        today = date.today()
+
+    forecasts = _load_forecasts()
+    prices = _load_prices()
+
+    # Alegem cea mai recentă săptămână pentru care avem forecast
+    latest_week = forecasts["WeekStart"].max()
+    week_rows = forecasts[forecasts["WeekStart"] == latest_week]
+
+    target_date = week_rows["TargetDate"].max()
+    f_week = week_rows[week_rows["TargetDate"] == target_date].copy()
+
+    if f_week.empty:
+        raise ValueError("No forecasts found for latest week.")
+
+    # Calculează randamentele reale
+    returns = _compute_weekly_returns(prices, latest_week, target_date)
+
+    # !!! Aici era KeyError: acum returns are garantat Ticker + Region
     merged = f_week.merge(returns, on=["Ticker", "Region"], how="left")
 
-    merged["Error_Pct"] = merged["Real_Return_Pct"] - merged["ER_Pct"]
+    merged["Realized_Pct"] = merged["Realized_Pct"].fillna(0.0)
+    merged["Error_Pct"] = merged["Realized_Pct"] - merged["ER_Pct"]
 
-    # fișiere out
-    suffix = week_end.strftime("%Y%m%d")
-    csv_path = os.path.join(REPORT_DIR, f"weekly_report_{suffix}.csv")
-    xlsx_path = os.path.join(REPORT_DIR, f"weekly_report_{suffix}.xlsx")
-    png_path = os.path.join(REPORT_DIR, f"weekly_plot_{suffix}.png")
+    # sortare pentru raport: cele mai bune / mai slabe predicții
+    merged.sort_values("ER_Pct", ascending=False, inplace=True)
 
+    # Director de output
+    out_dir = settings.DATA_DIR / "weekly_reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = latest_week.strftime("%Y%m%d")
+    csv_path = out_dir / f"weekly_report_{stamp}.csv"
+    xlsx_path = out_dir / f"weekly_report_{stamp}.xlsx"
+    plot_path = out_dir / f"weekly_plot_{stamp}.png"
+
+    # Salvăm CSV
     merged.to_csv(csv_path, index=False)
-    merged.to_excel(xlsx_path, index=False)
-    generate_plot(merged, png_path)
 
-    print(f"[REPORT] Saved CSV to {csv_path}")
-    print(f"[REPORT] Saved XLSX to {xlsx_path}")
-    print(f"[REPORT] Saved PNG to {png_path}")
+    # Salvăm Excel
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        merged.to_excel(writer, index=False, sheet_name="Model_vs_Real")
 
-    text_summary = build_text_summary(merged, week_start, week_end)
+    # Grafic simplu: ER_Pct vs Realized_Pct
+    _plot_forecast_vs_real(merged, plot_path, latest_week, target_date)
 
-    return {
-        "week_start": week_start,
-        "week_end": week_end,
-        "summary_text": text_summary,
-        "csv_path": csv_path,
-        "xlsx_path": xlsx_path,
-        "png_path": png_path,
+    info = WeeklyReportInfo(
+        week_start=latest_week,
+        target_date=target_date,
+        csv_path=csv_path,
+        xlsx_path=xlsx_path,
+        plot_path=plot_path,
+        n_forecasts=len(f_week),
+        n_with_real=(merged["Realized_Pct"] != 0.0).sum(),
+    )
+
+    print(
+        f"[REPORT] Generated weekly report for {latest_week} -> {target_date} "
+        f"(tickers={info.n_forecasts}, with_real={info.n_with_real})"
+    )
+
+    return info
+
+
+def _plot_forecast_vs_real(
+    df: pd.DataFrame,
+    path: Path,
+    week_start: date,
+    target_date: date,
+) -> None:
+    # luăm top 10 ca să nu iasă graficul ilizibil
+    top = df.copy().sort_values("ER_Pct", ascending=False).head(10)
+
+    plt.figure(figsize=(10, 6))
+    x = range(len(top))
+
+    plt.bar(x, top["ER_Pct"], width=0.4, label="Model ER %")
+    plt.bar(
+        [i + 0.4 for i in x],
+        top["Realized_Pct"],
+        width=0.4,
+        label="Realized %"
+    )
+
+    plt.xticks([i + 0.2 for i in x], top["Ticker"], rotation=45)
+    plt.ylabel("Return %")
+    plt.title(f"StockD weekly forecast vs real ({week_start} → {target_date})")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+    print(f"[REPORT] Saved plot to {path}")
+
+
+# ----------------- TELEGRAM -----------------
+
+
+def _telegram_base_url() -> Optional[str]:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[TELEGRAM] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID, skipping.")
+        return None
+    return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+
+def _send_telegram_text(message: str) -> None:
+    base = _telegram_base_url()
+    if base is None:
+        return
+
+    url = f"{base}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
     }
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        r.raise_for_status()
+        print("[TELEGRAM] Sent text message.")
+    except Exception as exc:
+        print(f"[TELEGRAM] ERROR sending text: {exc}")
 
 
-def run_report_and_notify():
+def _send_telegram_document(path: Path, caption: str = "") -> None:
+    base = _telegram_base_url()
+    if base is None:
+        return
+
+    url = f"{base}/sendDocument"
+    try:
+        with path.open("rb") as f:
+            files = {"document": (path.name, f)}
+            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+            r = requests.post(url, data=data, files=files, timeout=30)
+            r.raise_for_status()
+        print(f"[TELEGRAM] Sent document: {path.name}")
+    except Exception as exc:
+        print(f"[TELEGRAM] ERROR sending document {path}: {exc}")
+
+
+def _send_telegram_photo(path: Path, caption: str = "") -> None:
+    base = _telegram_base_url()
+    if base is None:
+        return
+
+    url = f"{base}/sendPhoto"
+    try:
+        with path.open("rb") as f:
+            files = {"photo": (path.name, f)}
+            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": caption}
+            r = requests.post(url, data=data, files=files, timeout=30)
+            r.raise_for_status()
+        print(f"[TELEGRAM] Sent photo: {path.name}")
+    except Exception as exc:
+        print(f"[TELEGRAM] ERROR sending photo {path}: {exc}")
+
+
+# ----------------- ORCHESTRATOR -----------------
+
+
+def run_report_and_notify() -> None:
     info = run_report()
 
-    # text
-    send_telegram_message(info["summary_text"])
+    msg = (
+        f"*StockD – Weekly evaluation*\n"
+        f"Week: `{info.week_start}` → `{info.target_date}`\n"
+        f"Tickers in forecast: *{info.n_forecasts}*\n"
+        f"With realized prices: *{info.n_with_real}*\n\n"
+        f"Files:\n"
+        f"- CSV: `{info.csv_path.name}`\n"
+        f"- Excel: `{info.xlsx_path.name}`\n"
+        f"- Plot: `{info.plot_path.name}`"
+    )
 
-    # atașamente (CSV + Excel + grafic)
-    send_telegram_document(
-        info["csv_path"],
-        caption="Raport săptămânal – date CSV",
-    )
-    send_telegram_document(
-        info["xlsx_path"],
-        caption="Raport săptămânal – Excel",
-    )
-    if os.path.exists(info["png_path"]):
-        send_telegram_photo(
-            info["png_path"],
-            caption="Eroare predicție vs randament real",
-        )
+    _send_telegram_text(msg)
+    _send_telegram_document(info.csv_path, caption="Weekly report (CSV)")
+    _send_telegram_document(info.xlsx_path, caption="Weekly report (Excel)")
+    _send_telegram_photo(info.plot_path, caption="Forecast vs Realized returns")
 
 
 if __name__ == "__main__":
