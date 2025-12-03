@@ -1,33 +1,46 @@
-name: Weekly Forecast (StockD)
+name: Weekly Forecast (Sunday 10:00)
 
 on:
   schedule:
-    # Duminică la 09:00 UTC ~ 10:00 în Olanda (CET)
-    - cron: "0 9 * * 0"
+    - cron: "0 8 * * 0"   # 08:00 UTC = 10:00 România
   workflow_dispatch:
 
 jobs:
-  weekly-forecast:
+  forecast:
     runs-on: ubuntu-latest
 
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run weekly StockD model (next week benchmark)
+      - name: Run weekly StockD forecast
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python -m stockd.model_weekly
+          export PYTHONPATH="$PYTHONPATH:$(pwd)"
+          python stockd/model_weekly.py
+
+      - name: Commit forecast file
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Weekly forecast generated"
+          file_pattern: data/forecasts_stockd.csv
+          commit_user_name: "StockD Agent"
+
+      - name: Send Telegram notification
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          TEXT="Weekly forecast generated successfully."
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$TEXT"
