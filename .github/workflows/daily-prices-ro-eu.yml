@@ -2,7 +2,7 @@ name: Daily RO Prices (BVB)
 
 on:
   schedule:
-    # 17:05 UTC ≈ 19:05 în România, Luni–Vineri
+    # 17:05 UTC ≈ 19:05 România (EET), Luni–Vineri
     - cron: "5 17 * * 1-5"
   workflow_dispatch:
 
@@ -37,7 +37,9 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Daily prices update (RO, BVB)"
+          file_pattern: data/prices_history.csv
           commit_user_name: "StockD Agent"
           commit_user_email: "stockd@bot.com"
-          file_pattern: data/prices_history.csv
-          pull_strategy: "pull"
+          commit_author: "drapin22 <246702585+drapin22@users.noreply.github.com>"
+          skip_fetch: true
+          push_options: "--force-with-lease"
