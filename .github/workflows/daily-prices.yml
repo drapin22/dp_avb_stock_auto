@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: daily-prices
+  group: daily-prices-all
   cancel-in-progress: false
 
 jobs:
@@ -25,16 +25,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Fetch RO + EU + US prices
+      - name: Fetch RO from BVB
         run: |
           export PYTHONPATH="$PYTHONPATH:$(pwd)"
-          python stockd/run_daily.py --regions RO,EU,US
+          python agents/bvb_agent.py
+
+      - name: Fetch EU + US from Yahoo
+        run: |
+          export PYTHONPATH="$PYTHONPATH:$(pwd)"
+          python stockd/run_daily.py --regions EU,US
 
       - name: Commit updated prices_history.csv
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Daily prices update (RO + EU + US)"
+          file_pattern: data/prices_history.csv
           commit_user_name: "StockD Agent"
           commit_user_email: "stockd@bot.com"
-          file_pattern: data/prices_history.csv
-          pull_strategy: "pull"
+          commit_author: "drapin22 <246702585+drapin22@users.noreply.github.com>"
+          skip_fetch: true
+          push_options: "--force-with-lease"
