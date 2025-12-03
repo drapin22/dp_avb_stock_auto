@@ -1,38 +1,38 @@
-name: Daily Prices RO + EU
+name: Daily EU prices (Yahoo)
 
 on:
-  # 17:00 UTC = 19:00 România (EET) de luni până vineri
   schedule:
+    # Rulează tot la 17:00 UTC (≈ 19:00 România) în zilele lucrătoare
     - cron: "0 17 * * 1-5"
   workflow_dispatch:
 
 jobs:
-  daily-prices-ro-eu:
+  fetch-eu:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
 
-      - name: Fetch RO + EU prices
+      - name: Set PYTHONPATH
         run: |
-          export PYTHONPATH=$PYTHONPATH:${{ github.workspace }}
-          python stockd/run_daily.py --regions RO,EU
+          echo "PYTHONPATH=$PYTHONPATH:${{ github.workspace }}" >> $GITHUB_ENV
+
+      - name: Fetch EU prices
+        run: |
+          python stockd/run_daily.py --regions EU
 
       - name: Commit updated prices_history.csv
-        run: |
-          git config --global user.name "StockD Agent"
-          git config --global user.email "agent@stockd.ai"
-
-          git add data/prices_history.csv || true
-          git commit -m "Daily RO+EU price update" || echo "No changes to commit"
-          git push
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Daily EU price update"
+          file_pattern: "data/prices_history.csv"
