@@ -1,16 +1,17 @@
-name: Weekly Performance Report
+name: Weekly Report (Model vs Real)
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 9 * * 6"  # Saturday 09:00 UTC
+    # 09:00 UTC ~ 10:00 în Olanda iarna
+    - cron: "0 9 * * 6"
+  workflow_dispatch:
 
 jobs:
-  weekly-eval:
+  weekly-report:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -20,20 +21,23 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run weekly evaluation
-        run: python reports/weekly_eval.py
-
-      - name: Commit weekly report
+      - name: Run weekly report and send Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          git config --global user.name "StockD Agent"
-          git config --global user.email "agent@stockd.local"
-          git add data/weekly_returns_latest.csv
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else:
-            git commit -m "Weekly returns report"
-            git push
-          fi
+          python -m stockd.weekly_report
+
+      - name: Commit weekly report artifacts
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Weekly report (model vs real)"
+          file_pattern: |
+            data/weekly_report/*.csv
+            data/weekly_report/*.xlsx
+            data/weekly_report/*.png
+          commit_user_name: StockD Agent
+          commit_user_email: stockd@bot.com
