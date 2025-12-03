@@ -32,7 +32,9 @@ jobs:
           python stockd/run_daily.py --regions EU
 
       - name: Commit updated prices_history.csv
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Daily EU price update"
-          file_pattern: "data/prices_history.csv"
+      - uses: stefanzweifel/git-auto-commit-action@v5
+  with:
+    commit_message: "Updated prices_history.csv"
+    commit_user_name: "StockD Agent"
+    commit_user_email: "stockd@bot.com"
+    pull_strategy: "pull"         # <<< magie: face git pull înainte de push
