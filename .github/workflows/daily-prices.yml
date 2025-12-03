@@ -1,13 +1,13 @@
-name: Daily Prices Sync
+name: Daily RO prices (BVB)
 
 on:
   schedule:
-    # Luni–vineri, după închiderea BVB (ajustezi ora la fusul tău)
-    - cron: '30 15 * * 1-5'
+    # Rulează la 17:00 UTC (≈ 19:00 România iarna) în zilele lucrătoare
+    - cron: "0 17 * * 1-5"
   workflow_dispatch:
 
 jobs:
-  fetch-bvb-and-global:
+  fetch-ro:
     runs-on: ubuntu-latest
 
     steps:
@@ -17,22 +17,22 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run daily sync (RO + EU + US)
-        run: python -m stockd.run_daily
+      - name: Set PYTHONPATH
+        run: |
+          echo "PYTHONPATH=$PYTHONPATH:${{ github.workspace }}" >> $GITHUB_ENV
+
+      - name: Run BVB agent (RO)
+        run: |
+          python agents/bvb_agent.py
 
       - name: Commit updated prices_history.csv
-        run: |
-          git config --global user.name "StockD Agent"
-          git config --global user.email "agent@example.com"
-          git add data/prices_history.csv
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "Daily price update"
-            git push
-          fi
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Daily RO price update"
+          file_pattern: "data/prices_history.csv"
