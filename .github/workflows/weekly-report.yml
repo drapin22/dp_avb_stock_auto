@@ -2,7 +2,7 @@ name: Weekly Report (Model vs Real)
 
 on:
   schedule:
-    # 09:00 UTC ~ 10:00 în Olanda iarna
+    # Sâmbăta la 09:00 UTC ≈ 10:00 GMT+1
     - cron: "0 9 * * 6"
   workflow_dispatch:
 
@@ -21,23 +21,21 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run weekly report and send Telegram
+      - name: Run weekly BVB model vs real report
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -m stockd.weekly_report
 
-      - name: Commit weekly report artifacts
+      - name: Commit weekly report Excel
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Weekly report (model vs real)"
-          file_pattern: |
-            data/weekly_report/*.csv
-            data/weekly_report/*.xlsx
-            data/weekly_report/*.png
-          commit_user_name: StockD Agent
-          commit_user_email: stockd@bot.com
+          commit_message: "Weekly BVB model vs real report"
+          file_pattern: "reports/weekly_bvb_model_vs_real_*.xlsx"
+          commit_user_name: "StockD Agent"
+          commit_user_email: "stockd@bot.com"
+          commit_author: "${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>"
