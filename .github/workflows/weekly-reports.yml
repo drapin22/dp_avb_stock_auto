@@ -1,9 +1,9 @@
-name: Weekly Performance Report
+name: Weekly Report (Model vs Real)
 
 on:
   schedule:
-    # Vineri seara – după ce piața a închis
-    - cron: '0 20 * * 5'
+    # Sâmbăta la 09:00 UTC ≈ 10:00 GMT+1
+    - cron: "0 9 * * 6"
   workflow_dispatch:
 
 jobs:
@@ -11,28 +11,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - run: pip install -r requirements.txt
-
-      - name: Compute weekly performance (all regions)
-        run: python -m analytics.weekly_performance
-
-      - name: Evaluate StockD model vs reality (weekly)
-        run: python -m analytics.model_vs_real
-
-      - name: Commit evaluation reports
+      - name: Install dependencies
         run: |
-          git config --global user.name "StockD Agent"
-          git config --global user.email "agent@example.com"
-          git add data/model_eval_*.csv
-          if git diff --cached --quiet; then
-            echo "No new evaluation changes."
-          else:
-            git commit -m "Weekly model evaluation"
-            git push
-          fi
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run weekly BVB model vs real report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -m stockd.weekly_report
+
+      - name: Commit weekly report Excel
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Weekly BVB model vs real report"
+          file_pattern: "reports/weekly_bvb_model_vs_real_*.xlsx"
+          commit_user_name: "StockD Agent"
+          commit_user_email: "stockd@bot.com"
+          commit_author: "${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>"
