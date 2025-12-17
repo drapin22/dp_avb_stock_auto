@@ -11,7 +11,6 @@ import pandas as pd
 from stockd import settings
 from stockd.news_rss import fetch_headlines_for_ticker
 
-# OpenAI import safe
 try:
     from openai import OpenAI
     _OPENAI_OK = True
@@ -24,21 +23,41 @@ def _overrides_path() -> Path:
     return getattr(settings, "MENTOR_OVERRIDES_FILE", settings.DATA_DIR / "mentor_overrides.json")
 
 
+def _raw_path(week_end: date) -> Path:
+    settings.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    return settings.REPORTS_DIR / f"mentor_raw_{week_end.isoformat()}.txt"
+
+
 def _extract_json_object(text: str) -> Optional[dict]:
     if not text:
         return None
+
     t = text.strip()
+
+    # curăță fence-uri markdown
+    if t.startswith("```"):
+        t = t.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
+
+    # încercare directă
     try:
-        return json.loads(t)
+        obj = json.loads(t)
+        if isinstance(obj, dict):
+            return obj
     except Exception:
         pass
+
+    # fallback: primul { ... } ultimul }
     a = t.find("{")
     b = t.rfind("}")
     if a != -1 and b != -1 and b > a:
+        chunk = t[a:b + 1]
         try:
-            return json.loads(t[a:b + 1])
+            obj = json.loads(chunk)
+            if isinstance(obj, dict):
+                return obj
         except Exception:
             return None
+
     return None
 
 
@@ -53,26 +72,20 @@ def _write_overrides(payload: dict) -> None:
 
 
 def _to_json_safe(obj: Any) -> Any:
-    """
-    Convert pandas/numpy objects to JSON-serializable types.
-    """
     if obj is None:
         return None
 
-    # pandas Timestamp / datetime-like
     if isinstance(obj, pd.Timestamp):
         if pd.isna(obj):
             return None
         return obj.isoformat()
 
-    # pandas NaT
     try:
         if pd.isna(obj):
             return None
     except Exception:
         pass
 
-    # numpy scalars
     try:
         import numpy as np
         if isinstance(obj, (np.integer,)):
@@ -84,21 +97,17 @@ def _to_json_safe(obj: Any) -> Any:
     except Exception:
         pass
 
-    # python date
     if isinstance(obj, date):
         return obj.isoformat()
 
-    # dict/list recursion
     if isinstance(obj, dict):
         return {str(k): _to_json_safe(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_to_json_safe(x) for x in obj]
 
-    # fallback primitives
     if isinstance(obj, (str, int, float, bool)):
         return obj
 
-    # last resort
     return str(obj)
 
 
@@ -110,7 +119,7 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
 
     lines: List[str] = []
     lines.append(f"# StockD Mentor Postmortem ({week_end.isoformat()})\n")
-    lines.append("This report is generated from realized errors + RSS headlines. If evidence is insufficient, cause is UNKNOWN.\n")
+    lines.append("Generated from realized errors + RSS headlines. If evidence is insufficient, cause is UNKNOWN.\n")
     lines.append("| Ticker | Region | Pred% | Real% | AbsErr pp | Cause | Conf | Overrides | Evidence |")
     lines.append("|---|---|---:|---:|---:|---|---:|---|---|")
 
@@ -133,7 +142,7 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
         ov_txt = ", ".join(ov)
 
         ev = it.get("evidence_headlines", []) or []
-        ev_txt = "; ".join([str(x) for x in ev[:2]])[:140]
+        ev_txt = "; ".join([str(x) for x in ev[:2]])[:160]
 
         lines.append(f"| {t} | {reg} | {pred:+.2f} | {real:+.2f} | {ab:.2f} | {cause} | {conf:.2f} | {ov_txt} | {ev_txt} |")
 
@@ -141,17 +150,56 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
     return md_path
 
 
+def _call_mentor_llm(client: OpenAI, model_name: str, system: str, user_payload: dict) -> str:
+    """
+    Încearcă JSON-mode dacă e suportat. Dacă nu, cade pe call normal.
+    Returnează content (string) sau "".
+    """
+    user_text = json.dumps(_to_json_safe(user_payload), ensure_ascii=False)
+
+    # încercare cu response_format dacă SDK-ul/endpoint-ul suportă
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.2,
+            max_tokens=1400,
+            response_format={"type": "json_object"},
+        )
+        return resp.choices[0].message.content if resp.choices else ""
+    except TypeError:
+        # SDK vechi: fără response_format
+        pass
+    except Exception:
+        # altă eroare: lăsăm fallback să încerce fără JSON mode
+        pass
+
+    resp = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_text},
+        ],
+        temperature=0.2,
+        max_tokens=1400,
+    )
+    return resp.choices[0].message.content if resp.choices else ""
+
+
 def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_days: int = 12) -> Dict[str, Any]:
+    import os
+
     if eval_df is None or eval_df.empty:
         overrides = {"status": "NO_EVAL", "items": [], "global_notes": "No eval rows provided."}
         _write_overrides(overrides)
         return {"status": "NO_EVAL"}
 
     df = eval_df.copy()
-    df["AbsError_Pct"] = pd.to_numeric(df.get("AbsError_Pct"), errors="coerce")
-    df["Error_Pct"] = pd.to_numeric(df.get("Error_Pct"), errors="coerce")
-    df["Model_ER_Pct"] = pd.to_numeric(df.get("Model_ER_Pct"), errors="coerce")
-    df["Realized_Pct"] = pd.to_numeric(df.get("Realized_Pct"), errors="coerce")
+    for c in ["AbsError_Pct", "Error_Pct", "Model_ER_Pct", "Realized_Pct"]:
+        df[c] = pd.to_numeric(df.get(c), errors="coerce")
 
     df = df.dropna(subset=["Ticker", "Region", "AbsError_Pct", "Model_ER_Pct", "Realized_Pct"])
     if df.empty:
@@ -161,8 +209,7 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
 
     worst = df.sort_values("AbsError_Pct", ascending=False).head(top_n).copy()
 
-    # RSS headlines
-    head_payload = []
+    head_payload: List[Dict[str, Any]] = []
     for _, r in worst.iterrows():
         t = str(r["Ticker"])
         reg = str(r["Region"])
@@ -173,50 +220,39 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
             head_payload.append({
                 "Ticker": t,
                 "Region": reg,
-                "PublishedAt": str(hr.get("PublishedAt", "")),
-                "Headline": str(hr.get("Headline", "")),
-                "Link": str(hr.get("Link", "")),
-                "Query": str(hr.get("Query", "")),
+                "PublishedAt": hr.get("PublishedAt", ""),
+                "Headline": hr.get("Headline", ""),
+                "Link": hr.get("Link", ""),
+                "Query": hr.get("Query", ""),
             })
 
-    # Fallback dacă nu avem OpenAI sau nu avem key
-    import os
     api_key_present = bool(os.getenv("OPENAI_API_KEY", "").strip())
     if not _OPENAI_OK or not api_key_present:
         overrides = {
             "status": "SKIPPED_NO_OPENAI",
             "items": [
-                {
-                    "Ticker": str(r["Ticker"]),
-                    "Region": str(r["Region"]),
-                    "cause": "UNKNOWN",
-                    "confidence_0_1": 0.0,
-                    "evidence_headlines": [],
-                }
+                {"Ticker": str(r["Ticker"]), "Region": str(r["Region"]), "cause": "UNKNOWN", "confidence_0_1": 0.0, "evidence_headlines": []}
                 for _, r in worst.iterrows()
             ],
-            "global_notes": "OpenAI not available or OPENAI_API_KEY missing. Generated UNKNOWN diagnostics only.",
+            "global_notes": "OpenAI not available or OPENAI_API_KEY missing. UNKNOWN-only diagnostics.",
         }
         _write_overrides(overrides)
         md_path = _build_postmortem_md(worst, overrides, week_end)
         return {"status": "SKIPPED_NO_OPENAI", "md_path": str(md_path)}
 
-    # Build JSON-safe payload
     worst_payload = worst[[
         "Ticker", "Region", "WeekStart", "TargetDate",
         "Model_ER_Pct", "Realized_Pct", "Error_Pct", "AbsError_Pct", "DirectionHit"
     ]].to_dict(orient="records")
-    worst_payload = _to_json_safe(worst_payload)
-    head_payload = _to_json_safe(head_payload)
 
     system = (
         "You are StockD Mentor. Diagnose forecast errors using ONLY the provided headlines and numeric data. "
         "If evidence is insufficient, output cause UNKNOWN. "
-        "Return STRICT JSON only, no prose."
+        "Return STRICT JSON object only (no markdown, no commentary)."
     )
 
-    user = {
-        "task": "Post-mortem diagnosis of why forecast was wrong, plus conservative safe guardrails for next time.",
+    user_payload = {
+        "task": "Post-mortem diagnosis of why forecast was wrong, plus conservative guardrails for next time.",
         "allowed_causes": [
             "EARNINGS", "MACRO", "POLICY_REGULATION", "SECTOR", "COMPANY_NEWS",
             "LIQUIDITY_MICROSTRUCTURE", "FX_RATES", "TECHNICALS", "UNKNOWN"
@@ -225,13 +261,10 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
             "use_only_provided_headlines": True,
             "do_not_invent_events": True,
             "overrides_must_be_conservative": True,
-            "override_limits": {
-                "clip_pct_range": [1.0, 10.0],
-                "multiplier_cap_range": [0.25, 2.50]
-            }
+            "override_limits": {"clip_pct_range": [1.0, 10.0], "multiplier_cap_range": [0.25, 2.50]},
         },
-        "worst_cases": worst_payload,
-        "headlines": head_payload,
+        "worst_cases": _to_json_safe(worst_payload),
+        "headlines": _to_json_safe(head_payload),
         "output_schema": {
             "diagnostics": [
                 {
@@ -249,23 +282,25 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
     }
 
     model_name = getattr(settings, "COACH_MODEL_NAME", None) or settings.MODEL_NAME
-
     client = OpenAI()
-    resp = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(_to_json_safe(user))},
-        ],
-        temperature=0.2,
-        max_tokens=1200,
-    )
 
-    content = resp.choices[0].message.content if resp.choices else ""
-    parsed = _extract_json_object(content)
+    # try 1
+    content1 = _call_mentor_llm(client, model_name, system, user_payload)
+    _raw_path(week_end).write_text((content1 or "") + "\n", encoding="utf-8")
+    parsed = _extract_json_object(content1 or "")
+
+    # retry if invalid
+    if not parsed or "diagnostics" not in parsed:
+        hard_system = (
+            "Return ONLY a valid JSON object. No markdown. No extra keys outside the schema. "
+            "If unsure, set cause to UNKNOWN and confidence_0_1 to 0.0."
+        )
+        content2 = _call_mentor_llm(client, model_name, hard_system, user_payload)
+        _raw_path(week_end).write_text(((content1 or "") + "\n\n--- RETRY ---\n\n" + (content2 or "")), encoding="utf-8")
+        parsed = _extract_json_object(content2 or "")
 
     if not parsed or "diagnostics" not in parsed:
-        overrides = {"status": "LLM_INVALID", "items": [], "global_notes": content[:800]}
+        overrides = {"status": "LLM_INVALID", "items": [], "global_notes": (content1 or "")[:800]}
         _write_overrides(overrides)
         md_path = _build_postmortem_md(worst, overrides, week_end)
         return {"status": "LLM_INVALID", "md_path": str(md_path)}
@@ -280,7 +315,6 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
 
         so = d.get("safe_overrides", {}) or {}
         item = {"Ticker": t, "Region": reg, "cause": cause, "confidence_0_1": conf}
-
         item["evidence_headlines"] = (d.get("evidence_headlines", []) or [])[:4]
 
         if "clip_pct" in so:
