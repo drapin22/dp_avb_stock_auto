@@ -15,17 +15,7 @@ from stockd import settings
 client = OpenAI()
 
 
-def _compute_ticker_features(
-    prices_history: pd.DataFrame,
-    holdings: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Feature-uri per (Ticker, Region):
-      - last_close
-      - ret_5d, ret_20d, ret_60d (%)
-      - vol_20d (%)
-      - max_dd_60d (%)
-    """
+def _compute_ticker_features(prices_history: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFrame:
     if prices_history.empty or holdings.empty:
         return pd.DataFrame(columns=[
             "Ticker", "Region", "last_close",
@@ -33,14 +23,10 @@ def _compute_ticker_features(
             "vol_20d", "max_dd_60d",
         ])
 
-    needed_cols = {"Date", "Ticker", "Region", "Close"}
-    if not needed_cols.issubset(set(prices_history.columns)):
-        raise ValueError(f"prices_history missing columns: {needed_cols - set(prices_history.columns)}")
-
     ph = prices_history.copy()
-    ph["Date"] = pd.to_datetime(ph["Date"])
+    ph["Date"] = pd.to_datetime(ph["Date"], errors="coerce")
     ph["Close"] = pd.to_numeric(ph["Close"], errors="coerce")
-    ph = ph.dropna(subset=["Close"])
+    ph = ph.dropna(subset=["Date", "Close"])
 
     hold = holdings[["Ticker", "Region"]].drop_duplicates().copy()
     ph = ph.merge(hold, on=["Ticker", "Region"], how="inner")
@@ -58,6 +44,8 @@ def _compute_ticker_features(
     for (tkr, reg), g in ph.groupby(["Ticker", "Region"], sort=False):
         g = g.sort_values("Date").copy()
         closes = g["Close"].astype(float).values
+        if len(closes) < 2:
+            continue
 
         last_close = float(closes[-1])
 
@@ -82,8 +70,8 @@ def _compute_ticker_features(
         max_dd_60d = float(dd.min() * 100.0) if not dd.empty else float("nan")
 
         out.append({
-            "Ticker": tkr,
-            "Region": reg,
+            "Ticker": str(tkr),
+            "Region": str(reg),
             "last_close": last_close,
             "ret_5d": ret_5d,
             "ret_20d": ret_20d,
@@ -151,24 +139,15 @@ def _build_prompt(
     prompt = f"""
 You are {settings.MODEL_VERSION_TAG}, a systematic multi-region equity forecaster.
 
-You DO NOT have live news feeds. You approximate regimes using price features:
-  - momentum (5/20/60 days),
-  - volatility (20d),
-  - max drawdown (60d),
-  - region-level averages.
+Return JSON: {{ "forecasts": [{{"Ticker": "...", "Region": "RO|EU|US", "ER_Pct": number}}] }}
 
 Date: {as_of.isoformat()}
-Forecast horizon: next {horizon_days} calendar days (about one trading week).
+Horizon: {horizon_days} days (about one trading week)
 
-Return a JSON object with "forecasts": list of entries:
-  - "Ticker" (string, exactly as input)
-  - "Region" (RO/EU/US)
-  - "ER_Pct" (number, expected % return over horizon; can be negative)
-
-Guidelines:
-  - Conservative magnitudes; typical weekly ER rarely exceeds +/-10%.
-  - If signal is weak, keep ER near 0.
-  - Use cross-sectional context within each Region.
+Rules:
+- Conservative magnitudes, typical weekly ER within +/-10%.
+- If weak signal, ER near 0.
+- Use price-based context only (no live news).
 
 HOLDINGS:
 {json.dumps(hold_records, indent=2)}
@@ -188,21 +167,22 @@ def run_stockd_model(
     as_of: date,
     horizon_days: int,
 ) -> pd.DataFrame:
+    """
+    Returnează DataFrame cu:
+      - Ticker, Region, ER_Pct
+      - EngineStatus: OK / FALLBACK_ZERO
+    """
     if holdings.empty:
-        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
+        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct", "EngineStatus"])
 
     holdings = holdings[["Ticker", "Region"]].drop_duplicates().copy()
+    holdings["Ticker"] = holdings["Ticker"].astype(str)
+    holdings["Region"] = holdings["Region"].astype(str)
 
     ticker_features = _compute_ticker_features(prices_history, holdings)
     region_summary = _compute_region_summary(ticker_features)
 
-    prompt = _build_prompt(
-        holdings=holdings,
-        ticker_features=ticker_features,
-        region_summary=region_summary,
-        as_of=as_of,
-        horizon_days=horizon_days,
-    )
+    prompt = _build_prompt(holdings, ticker_features, region_summary, as_of, horizon_days)
 
     schema: Dict[str, Any] = {
         "name": "stockd_output",
@@ -227,7 +207,6 @@ def run_stockd_model(
         },
     }
 
-    # Retry/backoff pentru stabilitate
     last_exc = None
     for attempt in range(1, 4):
         try:
@@ -241,13 +220,19 @@ def run_stockd_model(
             parsed = json.loads(raw_json)
             forecasts = parsed.get("forecasts", [])
             df = pd.DataFrame(forecasts)
+
             if df.empty:
-                raise ValueError("Empty forecasts from model.")
-            df["ER_Pct"] = pd.to_numeric(df.get("ER_Pct", 0.0), errors="coerce").fillna(0.0)
-            df = df[["Ticker", "Region", "ER_Pct"]].copy()
-            merged = holdings.merge(df, on=["Ticker", "Region"], how="left")
+                raise ValueError("Empty forecasts from model response.")
+
+            df["Ticker"] = df["Ticker"].astype(str)
+            df["Region"] = df["Region"].astype(str)
+            df["ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce").fillna(0.0)
+
+            merged = holdings.merge(df[["Ticker", "Region", "ER_Pct"]], on=["Ticker", "Region"], how="left")
             merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
+            merged["EngineStatus"] = "OK"
             return merged
+
         except Exception as exc:
             last_exc = exc
             sleep_s = 2 ** attempt
@@ -257,4 +242,5 @@ def run_stockd_model(
     print(f"[STOCKD] ERROR calling OpenAI after retries: {last_exc}")
     fb = holdings.copy()
     fb["ER_Pct"] = 0.0
+    fb["EngineStatus"] = "FALLBACK_ZERO"
     return fb
