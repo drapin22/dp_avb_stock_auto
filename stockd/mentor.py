@@ -52,6 +52,56 @@ def _write_overrides(payload: dict) -> None:
     p.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _to_json_safe(obj: Any) -> Any:
+    """
+    Convert pandas/numpy objects to JSON-serializable types.
+    """
+    if obj is None:
+        return None
+
+    # pandas Timestamp / datetime-like
+    if isinstance(obj, pd.Timestamp):
+        if pd.isna(obj):
+            return None
+        return obj.isoformat()
+
+    # pandas NaT
+    try:
+        if pd.isna(obj):
+            return None
+    except Exception:
+        pass
+
+    # numpy scalars
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+    except Exception:
+        pass
+
+    # python date
+    if isinstance(obj, date):
+        return obj.isoformat()
+
+    # dict/list recursion
+    if isinstance(obj, dict):
+        return {str(k): _to_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_json_safe(x) for x in obj]
+
+    # fallback primitives
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    # last resort
+    return str(obj)
+
+
 def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -> Path:
     md_path = settings.REPORTS_DIR / f"mentor_postmortem_{week_end.isoformat()}.md"
 
@@ -92,14 +142,6 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
 
 
 def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_days: int = 12) -> Dict[str, Any]:
-    """
-    Backward compatible API used by stockd.learning:
-      run_mentor(last_week_eval_df, week_end=<date>)
-    Produces:
-      - data/mentor_overrides.json (safe guardrails)
-      - reports/mentor_postmortem_YYYY-MM-DD.md
-    Returns dict with status + md_path
-    """
     if eval_df is None or eval_df.empty:
         overrides = {"status": "NO_EVAL", "items": [], "global_notes": "No eval rows provided."}
         _write_overrides(overrides)
@@ -119,7 +161,7 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
 
     worst = df.sort_values("AbsError_Pct", ascending=False).head(top_n).copy()
 
-    # headlines RSS
+    # RSS headlines
     head_payload = []
     for _, r in worst.iterrows():
         t = str(r["Ticker"])
@@ -137,8 +179,9 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
                 "Query": str(hr.get("Query", "")),
             })
 
-    # Dacă nu avem OpenAI sau nu avem key, facem fallback safe: UNKNOWN, fără overrides
-    api_key_present = bool(__import__("os").getenv("OPENAI_API_KEY", "").strip())
+    # Fallback dacă nu avem OpenAI sau nu avem key
+    import os
+    api_key_present = bool(os.getenv("OPENAI_API_KEY", "").strip())
     if not _OPENAI_OK or not api_key_present:
         overrides = {
             "status": "SKIPPED_NO_OPENAI",
@@ -158,13 +201,13 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
         md_path = _build_postmortem_md(worst, overrides, week_end)
         return {"status": "SKIPPED_NO_OPENAI", "md_path": str(md_path)}
 
-    # LLM mentor
-    client = OpenAI()
-
+    # Build JSON-safe payload
     worst_payload = worst[[
         "Ticker", "Region", "WeekStart", "TargetDate",
         "Model_ER_Pct", "Realized_Pct", "Error_Pct", "AbsError_Pct", "DirectionHit"
     ]].to_dict(orient="records")
+    worst_payload = _to_json_safe(worst_payload)
+    head_payload = _to_json_safe(head_payload)
 
     system = (
         "You are StockD Mentor. Diagnose forecast errors using ONLY the provided headlines and numeric data. "
@@ -207,11 +250,12 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
 
     model_name = getattr(settings, "COACH_MODEL_NAME", None) or settings.MODEL_NAME
 
+    client = OpenAI()
     resp = client.chat.completions.create(
         model=model_name,
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(user)},
+            {"role": "user", "content": json.dumps(_to_json_safe(user))},
         ],
         temperature=0.2,
         max_tokens=1200,
@@ -237,10 +281,8 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
         so = d.get("safe_overrides", {}) or {}
         item = {"Ticker": t, "Region": reg, "cause": cause, "confidence_0_1": conf}
 
-        # evidence limited
         item["evidence_headlines"] = (d.get("evidence_headlines", []) or [])[:4]
 
-        # safe overrides (optional)
         if "clip_pct" in so:
             item["clip_pct"] = _clamp(float(so["clip_pct"]), 1.0, 10.0)
         if "multiplier_cap" in so:
@@ -253,6 +295,5 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
     return {"status": "OK", "md_path": str(md_path)}
 
 
-# Optional alias: some code versions used run_mentor_diagnostics name
 def run_mentor_diagnostics(eval_df: pd.DataFrame, week_end: date, **kwargs) -> Dict[str, Any]:
     return run_mentor(eval_df, week_end=week_end, **kwargs)
