@@ -11,7 +11,7 @@ from stockd import settings
 from stockd.engine import run_stockd_model
 from stockd.calibration import load_calibration, apply_calibration
 from stockd.scoring import load_scores
-from stockd.telegram_utils import send_telegram_message, send_telegram_document
+from stockd.telegram_utils import send_telegram_message, send_telegram_long_message, send_telegram_document
 
 
 def get_next_monday(d: date) -> date:
@@ -82,6 +82,28 @@ def save_forecasts_append(new_df: pd.DataFrame) -> None:
     combined.to_csv(forecasts_path, index=False)
 
 
+def _format_full_list(df: pd.DataFrame, region: str) -> str:
+    g = df[df["Region"] == region].sort_values("RankSignal", ascending=False).copy()
+    if g.empty:
+        return f"Region {region}: (no tickers)\n"
+
+    lines = []
+    lines.append(f"Region {region} | {len(g)} tickers")
+    lines.append("Ticker | Adj% | Raw% | Score | Tier | RankSignal")
+    lines.append("------ | ---- | ---- | ----- | ---- | ---------")
+
+    for _, r in g.iterrows():
+        t = str(r["Ticker"])
+        adj = float(r["Adj_ER_Pct"])
+        raw = float(r["ER_Pct"])
+        sc = float(r.get("score_0_100", 50.0))
+        tier = str(r.get("confidence_tier", "MEDIUM"))
+        rs = float(r.get("RankSignal", adj))
+        lines.append(f"{t} | {adj:+.2f} | {raw:+.2f} | {sc:>5.0f} | {tier:<6} | {rs:+.2f}")
+
+    return "\n".join(lines)
+
+
 def run_stockd_weekly_model() -> None:
     today = date.today()
     week_start = get_next_monday(today)
@@ -125,7 +147,11 @@ def run_stockd_weekly_model() -> None:
     # join scores
     scores = load_scores()
     if not scores.empty:
-        merged = merged.merge(scores[["Ticker", "Region", "score_0_100", "confidence_tier"]], on=["Ticker", "Region"], how="left")
+        merged = merged.merge(
+            scores[["Ticker", "Region", "score_0_100", "confidence_tier"]],
+            on=["Ticker", "Region"],
+            how="left",
+        )
     else:
         merged["score_0_100"] = np.nan
         merged["confidence_tier"] = np.nan
@@ -133,7 +159,7 @@ def run_stockd_weekly_model() -> None:
     merged["score_0_100"] = pd.to_numeric(merged["score_0_100"], errors="coerce").fillna(50.0)
     merged["confidence_tier"] = merged["confidence_tier"].fillna("MEDIUM")
 
-    # “rank_signal” = Adj * (score/100) (conservator)
+    # rank signal conservator (dacă vrei fără scor, setează RankSignal=Adj_ER_Pct)
     merged["RankSignal"] = merged["Adj_ER_Pct"] * (merged["score_0_100"] / 100.0)
 
     rows = []
@@ -148,11 +174,11 @@ def run_stockd_weekly_model() -> None:
             "HorizonDays": horizon_days,
             "ER_Pct": float(r["ER_Pct"]),
             "Adj_ER_Pct": float(r["Adj_ER_Pct"]),
-            "EngineStatus": str(r.get("EngineStatus", "")),
-            "LastError": str(r.get("LastError", "")),
+            "RankSignal": float(r["RankSignal"]),
             "score_0_100": float(r["score_0_100"]),
             "confidence_tier": str(r["confidence_tier"]),
-            "RankSignal": float(r["RankSignal"]),
+            "EngineStatus": str(r.get("EngineStatus", "")),
+            "LastError": str(r.get("LastError", "")),
             "Notes": settings.FORECAST_NOTES,
         })
 
@@ -162,35 +188,30 @@ def run_stockd_weekly_model() -> None:
     run_csv = settings.REPORTS_DIR / f"weekly_forecast_{week_start.strftime('%Y-%m-%d')}_{target_date.strftime('%Y-%m-%d')}.csv"
     new_df.sort_values(["Region", "RankSignal"], ascending=[True, False]).to_csv(run_csv, index=False)
 
-    # Telegram
-    header = [
-        "*StockD weekly forecast*",
-        f"Week: *{week_start}* → *{target_date}*",
-        f"Universe: *{len(new_df)}* tickers",
-    ]
+    # Telegram header (scurt, ca să nu crape)
+    header_lines = []
+    header_lines.append("StockD weekly forecast")
+    header_lines.append(f"Week: {week_start} -> {target_date} | Universe: {len(new_df)} tickers")
 
-    warnings = []
     if not engine_ok:
-        warnings.append("Engine status: *FALLBACK* (OpenAI call failed or returned empty). Forecasts may be neutral.")
+        header_lines.append("WARNING: Engine FALLBACK (OpenAI call failed). Forecasts may be neutral.")
         le = str(merged["LastError"].iloc[0]) if len(merged) else ""
         if le:
-            warnings.append(f"LastError: `{le[:180]}`")
+            header_lines.append(f"LastError: {le[:180]}")
+
     if low_signal and engine_ok:
-        warnings.append("Model signal: *LOW VARIANCE* (near-constant outputs). Treat as low confidence.")
-    if warnings:
-        header += ["", "*Warnings:*"] + [f"- {w}" for w in warnings]
+        header_lines.append("WARNING: Low signal variance (near-constant outputs). Low confidence run.")
 
-    lines = []
-    lines += ["", "Top 10 signals (RankSignal):"]
-    top = new_df.sort_values(["RankSignal"], ascending=False).head(10)
-    for _, x in top.iterrows():
-        lines.append(
-            f"- {x['Ticker']} ({x['Region']}): *{float(x['Adj_ER_Pct']):+.2f}%* "
-            f"(score {float(x['score_0_100']):.0f}, tier {x['confidence_tier']}, raw {float(x['ER_Pct']):+.2f}%)"
-        )
+    send_telegram_message("\n".join(header_lines), parse_mode=None)
 
-    send_telegram_message("\n".join(header + lines))
-    send_telegram_document(str(run_csv), caption=f"Full forecast list: {week_start} → {target_date}")
+    # Trimite LISTA COMPLETĂ pentru toate deținerile (pe regiuni), împărțită în mesaje
+    for region in ["RO", "EU", "US"]:
+        block = _format_full_list(new_df, region)
+        # plain text, fără markdown, ca să nu crape la caractere speciale
+        send_telegram_long_message(block, parse_mode=None)
+
+    # Trimite și fișierul complet (toate coloanele)
+    send_telegram_document(str(run_csv), caption=f"Full forecast (all holdings): {week_start} -> {target_date}")
 
 
 if __name__ == "__main__":
