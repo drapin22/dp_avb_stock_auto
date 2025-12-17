@@ -2,51 +2,43 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
 import requests
 
 
-def _get_creds() -> tuple[str, str]:
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not bot_token or not chat_id:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in environment.")
-    return bot_token, chat_id
+def _get_token_chat():
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    return token, chat_id
 
 
-def send_telegram_message(text: str, parse_mode: str = "Markdown") -> None:
-    bot_token, chat_id = _get_creds()
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    r = requests.post(url, json=payload, timeout=30)
-    r.raise_for_status()
+def send_telegram_message(text: str) -> None:
+    token, chat_id = _get_token_chat()
+    if not token or not chat_id:
+        print("[TELEGRAM] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID. Skipping message.")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
+    r = requests.post(url, data=payload, timeout=25)
+    if not r.ok:
+        print(f"[TELEGRAM] sendMessage failed: {r.status_code} {r.text[:300]}")
 
 
-def send_telegram_document(path: str, caption: Optional[str] = None, parse_mode: str = "Markdown") -> None:
-    bot_token, chat_id = _get_creds()
-    url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
-    with open(path, "rb") as f:
+def send_telegram_document(file_path: str, caption: str = "") -> None:
+    token, chat_id = _get_token_chat()
+    if not token or not chat_id:
+        print("[TELEGRAM] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID. Skipping document.")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    with open(file_path, "rb") as f:
         files = {"document": f}
-        data = {"chat_id": chat_id}
-        if caption:
-            data["caption"] = caption
-            if parse_mode:
-                data["parse_mode"] = parse_mode
-        r = requests.post(url, data=data, files=files, timeout=90)
-        r.raise_for_status()
-
-
-def send_telegram_photo(path: str, caption: Optional[str] = None, parse_mode: str = "Markdown") -> None:
-    bot_token, chat_id = _get_creds()
-    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-    with open(path, "rb") as f:
-        files = {"photo": f}
-        data = {"chat_id": chat_id}
-        if caption:
-            data["caption"] = caption
-            if parse_mode:
-                data["parse_mode"] = parse_mode
-        r = requests.post(url, data=data, files=files, timeout=90)
-        r.raise_for_status()
+        data = {"chat_id": chat_id, "caption": caption[:1024]}
+        r = requests.post(url, data=data, files=files, timeout=60)
+    if not r.ok:
+        print(f"[TELEGRAM] sendDocument failed: {r.status_code} {r.text[:300]}")
