@@ -3,133 +3,103 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import time
 from typing import Dict, Any
 
-import numpy as pd
+import numpy as np
 import pandas as pd
 from openai import OpenAI
 
 from stockd import settings
 
-client = OpenAI()  # ia cheia din environment (GitHub secret OPENAI_API_KEY)
-
-
-# --------- HELPERI PENTRU FEATURE-URI DE PREȚ -----------------
+client = OpenAI()
 
 
 def _compute_ticker_features(
     prices_history: pd.DataFrame,
     holdings: pd.DataFrame,
-    as_of: date,
 ) -> pd.DataFrame:
     """
-    Construiește feature-uri agregate pentru fiecare ticker din holdings:
+    Feature-uri per (Ticker, Region):
       - last_close
       - ret_5d, ret_20d, ret_60d (%)
       - vol_20d (%)
-      - max_dd_60d (% drawdown max din ultimele 60 zile)
+      - max_dd_60d (%)
     """
-
     if prices_history.empty or holdings.empty:
         return pd.DataFrame(columns=[
-            "Ticker",
-            "Region",
-            "last_close",
-            "ret_5d",
-            "ret_20d",
-            "ret_60d",
-            "vol_20d",
-            "max_dd_60d",
+            "Ticker", "Region", "last_close",
+            "ret_5d", "ret_20d", "ret_60d",
+            "vol_20d", "max_dd_60d",
         ])
 
-    tickers = holdings["Ticker"].unique().tolist()
-    df = prices_history.copy()
-    df = df[df["Ticker"].isin(tickers)].copy()
+    needed_cols = {"Date", "Ticker", "Region", "Close"}
+    if not needed_cols.issubset(set(prices_history.columns)):
+        raise ValueError(f"prices_history missing columns: {needed_cols - set(prices_history.columns)}")
 
-    if df.empty:
+    ph = prices_history.copy()
+    ph["Date"] = pd.to_datetime(ph["Date"])
+    ph["Close"] = pd.to_numeric(ph["Close"], errors="coerce")
+    ph = ph.dropna(subset=["Close"])
+
+    hold = holdings[["Ticker", "Region"]].drop_duplicates().copy()
+    ph = ph.merge(hold, on=["Ticker", "Region"], how="inner")
+    if ph.empty:
         return pd.DataFrame(columns=[
-            "Ticker",
-            "Region",
-            "last_close",
-            "ret_5d",
-            "ret_20d",
-            "ret_60d",
-            "vol_20d",
-            "max_dd_60d",
+            "Ticker", "Region", "last_close",
+            "ret_5d", "ret_20d", "ret_60d",
+            "vol_20d", "max_dd_60d",
         ])
 
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values(["Ticker", "Date"])
+    cutoff = ph["Date"].max() - pd.Timedelta(days=80)
+    ph = ph[ph["Date"] >= cutoff].sort_values(["Ticker", "Region", "Date"]).copy()
 
-    # Păstrăm ultimele 70 de zile doar ca să nu explodeze prompt-ul
-    cutoff = df["Date"].max() - pd.Timedelta(days=70)
-    df = df[df["Date"] >= cutoff].copy()
+    out = []
+    for (tkr, reg), g in ph.groupby(["Ticker", "Region"], sort=False):
+        g = g.sort_values("Date").copy()
+        closes = g["Close"].astype(float).values
 
-    features = []
-
-    for (ticker, region), g in df.groupby(["Ticker", "Region"]):
-        g = g.sort_values("Date")
-        g["Close"] = g["Close"].astype(float)
-
-        last_close = float(g["Close"].iloc[-1])
+        last_close = float(closes[-1])
 
         def pct_return(n: int) -> float:
-            if len(g) < n + 1:
+            if len(closes) < n + 1:
                 return float("nan")
-            start = g["Close"].iloc[-(n + 1)]
-            end = g["Close"].iloc[-1]
-            return float((end / start - 1.0) * 100.0)
+            return float((closes[-1] / closes[-(n + 1)] - 1.0) * 100.0)
 
         ret_5d = pct_return(5)
         ret_20d = pct_return(20)
         ret_60d = pct_return(60)
 
-        # Volatilitate realizată pe 20 zile (std daily * sqrt(20))
-        if len(g) >= 20:
-            daily_ret = g["Close"].pct_change()
+        if len(closes) >= 21:
+            daily_ret = pd.Series(closes).pct_change()
             vol_20d = float(daily_ret.tail(20).std() * (20 ** 0.5) * 100.0)
         else:
             vol_20d = float("nan")
 
-        # Max drawdown pe 60 zile
         g_tail = g.tail(60).copy()
         roll_max = g_tail["Close"].cummax()
-        drawdown = g_tail["Close"] / roll_max - 1.0
-        max_dd_60d = float(drawdown.min() * 100.0) if not drawdown.empty else float("nan")
+        dd = g_tail["Close"] / roll_max - 1.0
+        max_dd_60d = float(dd.min() * 100.0) if not dd.empty else float("nan")
 
-        features.append(
-            {
-                "Ticker": ticker,
-                "Region": region,
-                "last_close": last_close,
-                "ret_5d": ret_5d,
-                "ret_20d": ret_20d,
-                "ret_60d": ret_60d,
-                "vol_20d": vol_20d,
-                "max_dd_60d": max_dd_60d,
-            }
-        )
+        out.append({
+            "Ticker": tkr,
+            "Region": reg,
+            "last_close": last_close,
+            "ret_5d": ret_5d,
+            "ret_20d": ret_20d,
+            "ret_60d": ret_60d,
+            "vol_20d": vol_20d,
+            "max_dd_60d": max_dd_60d,
+        })
 
-    return pd.DataFrame(features)
+    return pd.DataFrame(out)
 
 
 def _compute_region_summary(ticker_features: pd.DataFrame) -> pd.DataFrame:
-    """
-    Sumar pe regiune: medii ale feature-urilor.
-    Folosit ca proxy pentru:
-      - regim de risk-on / risk-off
-      - ciclu local vs global
-    """
-
     if ticker_features.empty:
         return pd.DataFrame(columns=[
-            "Region",
-            "avg_ret_5d",
-            "avg_ret_20d",
-            "avg_ret_60d",
-            "avg_vol_20d",
-            "avg_max_dd_60d",
-            "risk_regime",
+            "Region", "avg_ret_5d", "avg_ret_20d", "avg_ret_60d",
+            "avg_vol_20d", "avg_max_dd_60d", "risk_regime",
         ])
 
     agg = (
@@ -146,29 +116,25 @@ def _compute_region_summary(ticker_features: pd.DataFrame) -> pd.DataFrame:
         })
     )
 
-    # Etichetă grosieră de regim
     regimes = []
     for _, row in agg.iterrows():
         m20 = row["avg_ret_20d"]
         vol = row["avg_vol_20d"]
-        dd = row["avg_max_dd_60d"]  # negativ
-
+        dd = row["avg_max_dd_60d"]
         if pd.isna(m20):
             regime = "UNKNOWN"
         elif m20 > 3 and dd > -10:
             regime = "RISK_ON"
         elif m20 < -3 and dd < -15:
             regime = "RISK_OFF"
+        elif (not pd.isna(vol)) and vol > 8 and dd < -12:
+            regime = "RISK_OFF"
         else:
             regime = "NEUTRAL"
-
         regimes.append(regime)
 
     agg["risk_regime"] = regimes
     return agg
-
-
-# --------- BUILD PROMPT -----------------
 
 
 def _build_prompt(
@@ -178,68 +144,42 @@ def _build_prompt(
     as_of: date,
     horizon_days: int,
 ) -> str:
-    holdings_records = holdings.to_dict(orient="records")
+    hold_records = holdings[["Ticker", "Region"]].to_dict(orient="records")
     feat_records = ticker_features.to_dict(orient="records")
-    region_records = region_summary.to_dict(orient="records")
+    reg_records = region_summary.to_dict(orient="records")
 
     prompt = f"""
-You are STOCKD_V10.7F+, a systematic, multi-region equity forecaster.
+You are {settings.MODEL_VERSION_TAG}, a systematic multi-region equity forecaster.
 
-You DO NOT have live news feeds or macro databases.
-Instead, you approximate cycles, sentiment and risk regimes using:
-  - multi-horizon price momentum (5, 20, 60 days),
-  - realized volatility,
-  - max drawdown,
-  - region-level averages of these features.
+You DO NOT have live news feeds. You approximate regimes using price features:
+  - momentum (5/20/60 days),
+  - volatility (20d),
+  - max drawdown (60d),
+  - region-level averages.
 
-Today's date: {as_of.isoformat()}.
-Forecast horizon: next {horizon_days} calendar days (roughly 1 trading week).
+Date: {as_of.isoformat()}
+Forecast horizon: next {horizon_days} calendar days (about one trading week).
 
-For each ticker in the portfolio, you must estimate the *expected percentage price return*
-over this horizon (ER_Pct), taking into account:
-  - its own trend and drawdown vs history,
-  - its volatility,
-  - the risk regime of its Region (RO, EU, US),
-  - cross-section: how strong/weak it is vs other names in same Region.
-
-Assume:
-  - RO tickers are Romanian BVB equities (smaller, less liquid, more idiosyncratic).
-  - EU tickers are Western European large/mid caps.
-  - US tickers are US-listed names with higher liquidity.
-Macro and news effects are reflected indirectly through prices and regimes.
+Return a JSON object with "forecasts": list of entries:
+  - "Ticker" (string, exactly as input)
+  - "Region" (RO/EU/US)
+  - "ER_Pct" (number, expected % return over horizon; can be negative)
 
 Guidelines:
-  - Use conservative magnitudes. Weekly ER_Pct rarely exceeds +/-10% for normal names.
-  - If signal is weak or regime is very uncertain, keep ER_Pct close to 0.
-  - Keep RO more volatile than EU, and EU slightly less volatile than US growth names.
+  - Conservative magnitudes; typical weekly ER rarely exceeds +/-10%.
+  - If signal is weak, keep ER near 0.
+  - Use cross-sectional context within each Region.
 
-You must return a JSON object with a list "forecasts".
-Each forecast entry must have:
-  - "Ticker": string (exactly as given in the input),
-  - "Region": string ("RO", "EU" or "US"),
-  - "ER_Pct": number (expected price return % over the horizon, can be negative).
+HOLDINGS:
+{json.dumps(hold_records, indent=2)}
 
-PORTFOLIO HOLDINGS (current positions):
-{json.dumps(holdings_records, indent=2)}
-
-TICKER FEATURES (per name, based on last ~70 days):
-- last_close: last closing price in local currency
-- ret_5d/20d/60d: % price return over that window
-- vol_20d: realized volatility over last 20 days (annualized in %, approx.)
-- max_dd_60d: worst drawdown over last 60 days in %
-
+TICKER FEATURES:
 {json.dumps(feat_records, indent=2)}
 
-REGION SUMMARY (cycle / risk regime proxies):
-- average returns and volatility across names in the region
-- simple risk_regime flag: RISK_ON / RISK_OFF / NEUTRAL / UNKNOWN
-
-{json.dumps(region_records, indent=2)}
+REGION SUMMARY:
+{json.dumps(reg_records, indent=2)}
 """
     return prompt.strip()
-
-
-# --------- ENTRYPOINT: MODEL INTERFACE -----------------
 
 
 def run_stockd_model(
@@ -248,30 +188,14 @@ def run_stockd_model(
     as_of: date,
     horizon_days: int,
 ) -> pd.DataFrame:
-    """
-    Interfața oficială a modelului tău StockD.
-
-    Input:
-      - holdings: DataFrame cu cel puțin ['Ticker', 'Region']
-      - prices_history: toate prețurile istorice (RO + EU + US)
-      - as_of: data la care rulezi modelul
-      - horizon_days: orizontul în zile pentru care vrei ER
-
-    Output:
-      - DataFrame cu:
-          ['Ticker', 'Region', 'ER_Pct']
-    """
-
     if holdings.empty:
         return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
 
-    # 1) Feature-uri per ticker
-    ticker_features = _compute_ticker_features(prices_history, holdings, as_of)
+    holdings = holdings[["Ticker", "Region"]].drop_duplicates().copy()
 
-    # 2) Sumar pe regiune (proxy ciclo / sentiment)
+    ticker_features = _compute_ticker_features(prices_history, holdings)
     region_summary = _compute_region_summary(ticker_features)
 
-    # 3) Prompt
     prompt = _build_prompt(
         holdings=holdings,
         ticker_features=ticker_features,
@@ -280,7 +204,6 @@ def run_stockd_model(
         horizon_days=horizon_days,
     )
 
-    # 4) Schema pentru răspuns JSON
     schema: Dict[str, Any] = {
         "name": "stockd_output",
         "schema": {
@@ -304,42 +227,34 @@ def run_stockd_model(
         },
     }
 
-    try:
-        response = client.responses.create(
-            model=settings.MODEL_NAME,
-            input=prompt,
-            response_format={
-                "type": "json_schema",
-                "json_schema": schema,
-            },
-            max_output_tokens=1200,
-        )
+    # Retry/backoff pentru stabilitate
+    last_exc = None
+    for attempt in range(1, 4):
+        try:
+            response = client.responses.create(
+                model=settings.MODEL_NAME,
+                input=prompt,
+                response_format={"type": "json_schema", "json_schema": schema},
+                max_output_tokens=1200,
+            )
+            raw_json = response.output[0].content[0].text
+            parsed = json.loads(raw_json)
+            forecasts = parsed.get("forecasts", [])
+            df = pd.DataFrame(forecasts)
+            if df.empty:
+                raise ValueError("Empty forecasts from model.")
+            df["ER_Pct"] = pd.to_numeric(df.get("ER_Pct", 0.0), errors="coerce").fillna(0.0)
+            df = df[["Ticker", "Region", "ER_Pct"]].copy()
+            merged = holdings.merge(df, on=["Ticker", "Region"], how="left")
+            merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
+            return merged
+        except Exception as exc:
+            last_exc = exc
+            sleep_s = 2 ** attempt
+            print(f"[STOCKD] OpenAI call failed (attempt {attempt}/3): {exc}. Retrying in {sleep_s}s")
+            time.sleep(sleep_s)
 
-        raw_json = response.output[0].content[0].text
-        parsed = json.loads(raw_json)
-        forecasts = parsed.get("forecasts", [])
-
-    except Exception as exc:
-        print(f"[STOCKD] ERROR calling OpenAI: {exc}")
-        fb = holdings.copy()
-        fb["ER_Pct"] = 0.0
-        return fb[["Ticker", "Region", "ER_Pct"]]
-
-    if not forecasts:
-        fb = holdings.copy()
-        fb["ER_Pct"] = 0.0
-        return fb[["Ticker", "Region", "ER_Pct"]]
-
-    df = pd.DataFrame(forecasts)
-
-    # Curățare minimă
-    if "ER_Pct" not in df.columns:
-        df["ER_Pct"] = 0.0
-
-    df["ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce").fillna(0.0)
-
-    # Asigurăm acoperire pentru toate holding-urile
-    merged = holdings.merge(df, on=["Ticker", "Region"], how="left")
-    merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
-
-    return merged[["Ticker", "Region", "ER_Pct"]]
+    print(f"[STOCKD] ERROR calling OpenAI after retries: {last_exc}")
+    fb = holdings.copy()
+    fb["ER_Pct"] = 0.0
+    return fb
