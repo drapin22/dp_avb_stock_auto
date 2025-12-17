@@ -2,12 +2,15 @@ name: Weekly Report (Model vs Real)
 
 on:
   schedule:
-    # Sâmbăta la 09:00 UTC ≈ 10:00 CET/CEST
     - cron: "0 9 * * 6"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: weekly-report
+  cancel-in-progress: false
 
 jobs:
   weekly-report:
@@ -38,7 +41,7 @@ jobs:
         run: |
           python -m stockd.weekly_report
 
-      - name: Run learning (eval + scoring + mentor overrides)
+      - name: Run learning (eval + scoring + mentor)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -46,18 +49,13 @@ jobs:
         run: |
           python -m stockd.learning
 
-      - name: Pull latest main (rebase)
-        run: |
-          git config user.name "StockD Agent"
-          git config user.email "stockd@bot.com"
-          git pull --rebase origin main
-
       - name: Commit weekly report + learning artifacts
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Weekly report + learning artifacts"
           file_pattern: |
             reports/weekly_bvb_model_vs_real_*.xlsx
+            reports/weekly_forecast_*.csv
             reports/model_eval_detailed.csv
             reports/model_eval_summary.csv
             reports/mentor_postmortem_*.md
