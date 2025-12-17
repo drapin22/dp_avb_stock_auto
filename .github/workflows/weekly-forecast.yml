@@ -2,24 +2,23 @@ name: Weekly Forecast (Sunday 10:00)
 
 on:
   schedule:
-    - cron: "0 8 * * 0"
+    # Duminica la 10:00 UTC (ajustează dacă vrei alt fus orar)
+    - cron: "0 10 * * 0"
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: weekly-forecast
-  cancel-in-progress: false
-
 jobs:
-  forecast:
+  weekly-forecast:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -28,28 +27,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run learning loop (eval + calibration)
-        run: |
-          export PYTHONPATH="$PYTHONPATH:$(pwd)"
-          python -m stockd.learning
-
-      - name: Run weekly StockD forecast (writes Adj_ER_Pct too)
+      - name: Run weekly forecast (StockD)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          export PYTHONPATH="$PYTHONPATH:$(pwd)"
-          python stockd/model_weekly.py
+          python -m stockd.model_weekly
 
-      - name: Commit forecast + learning state
+      - name: Run learning loop (eval + calibration)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -m stockd.learning
+
+      - name: Commit updated data and reports
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Weekly forecast + learning state"
+          commit_message: "Weekly forecast + learning update"
           file_pattern: |
             data/forecasts_stockd.csv
             data/model_eval_detailed.csv
             data/model_eval_summary.csv
             data/calibration.json
+            reports/weekly_forecast_*.csv
           commit_user_name: "StockD Agent"
           commit_user_email: "stockd@bot.com"
+          commit_author: "${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>"
