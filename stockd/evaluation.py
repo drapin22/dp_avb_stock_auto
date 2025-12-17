@@ -8,137 +8,132 @@ import numpy as np
 from stockd import settings
 
 
-def load_prices() -> pd.DataFrame:
-    if not settings.PRICES_HISTORY.exists():
+def _load_prices() -> pd.DataFrame:
+    # preferă prices_all.csv dacă există, altfel prices_history.csv
+    path = settings.PRICES_ALL_CSV if settings.PRICES_ALL_CSV.exists() else settings.PRICES_HISTORY
+    if not path.exists():
         return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
-    df = pd.read_csv(settings.PRICES_HISTORY)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+
+    df = pd.read_csv(path)
+    df["Date"] = pd.to_datetime(df.get("Date"), errors="coerce")
+    df["Ticker"] = df.get("Ticker", "").astype(str)
+    df["Region"] = df.get("Region", "").astype(str)
+    df["Close"] = pd.to_numeric(df.get("Close"), errors="coerce")
     df = df.dropna(subset=["Date", "Ticker", "Region", "Close"])
+    df = df[df["Close"] > 0]
+
+    # sanity: elimină outlier jumps foarte mari (de obicei scrape glitch)
+    df = df.sort_values(["Ticker", "Region", "Date"]).copy()
+    df["pct"] = df.groupby(["Ticker", "Region"])["Close"].pct_change()
+    df = df[(df["pct"].isna()) | (df["pct"].abs() <= 0.60)]
+    df = df.drop(columns=["pct"], errors="ignore")
+
     return df
 
 
-def load_forecasts() -> pd.DataFrame:
-    if not settings.FORECASTS_FILE.exists():
+def _load_forecasts() -> pd.DataFrame:
+    path = settings.FORECASTS_FILE
+    if not path.exists():
         return pd.DataFrame(columns=[
             "Date","WeekStart","TargetDate","ModelVersion","Ticker","Region","HorizonDays","ER_Pct","Notes"
         ])
-    df = pd.read_csv(settings.FORECASTS_FILE)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df["WeekStart"] = pd.to_datetime(df["WeekStart"], errors="coerce")
-    df["TargetDate"] = pd.to_datetime(df["TargetDate"], errors="coerce")
-    df["ER_Pct"] = pd.to_numeric(df.get("ER_Pct", 0.0), errors="coerce").fillna(0.0)
-    if "ModelVersion" not in df.columns:
-        df["ModelVersion"] = settings.MODEL_VERSION_TAG
-    df = df.dropna(subset=["Date", "WeekStart", "TargetDate", "Ticker", "Region"])
+
+    df = pd.read_csv(path)
+    df["Date"] = pd.to_datetime(df.get("Date"), errors="coerce")
+    df["WeekStart"] = pd.to_datetime(df.get("WeekStart"), errors="coerce")
+    df["TargetDate"] = pd.to_datetime(df.get("TargetDate"), errors="coerce")
+    df["Ticker"] = df.get("Ticker", "").astype(str)
+    df["Region"] = df.get("Region", "").astype(str)
+    df["ModelVersion"] = df.get("ModelVersion", "").astype(str)
+    df["ER_Pct"] = pd.to_numeric(df.get("ER_Pct"), errors="coerce")
+
+    df = df.dropna(subset=["Date", "WeekStart", "TargetDate", "Ticker", "Region", "ModelVersion"])
+    df = df.sort_values("Date")
+    df = (
+        df.groupby(["WeekStart", "TargetDate", "Ticker", "Region", "ModelVersion"], as_index=False)
+          .tail(1)
+          .reset_index(drop=True)
+    )
     return df
 
 
-def dedup_forecasts(forecasts: pd.DataFrame) -> pd.DataFrame:
-    if forecasts.empty:
-        return forecasts
-    forecasts = forecasts.sort_values("Date", kind="mergesort")
-    key = ["WeekStart", "TargetDate", "Ticker", "Region", "ModelVersion"]
-    forecasts = forecasts.groupby(key, as_index=False).tail(1).reset_index(drop=True)
-    return forecasts
+def evaluate_weekly(prices: pd.DataFrame | None = None, forecasts: pd.DataFrame | None = None) -> pd.DataFrame:
+    prices = _load_prices() if prices is None else prices.copy()
+    forecasts = _load_forecasts() if forecasts is None else forecasts.copy()
 
-
-def _sort_for_asof(df: pd.DataFrame, on_col: str, by_cols: list[str]) -> pd.DataFrame:
-    """
-    merge_asof în pandas cere, în practică, sortare globală după on_col.
-    Ca să fie robust, folosim ordinea: [on_col] + by_cols.
-    """
-    cols = [on_col] + by_cols
-    return df.sort_values(cols, kind="mergesort").reset_index(drop=True)
-
-
-def evaluate_weekly(prices: pd.DataFrame, forecasts: pd.DataFrame) -> pd.DataFrame:
-    """
-    Weekly realized:
-      CloseStart = first Close on/after WeekStart (forward)
-      CloseEnd   = last  Close on/before TargetDate (backward)
-      Realized_Pct = (CloseEnd/CloseStart - 1)*100
-    """
     if prices.empty or forecasts.empty:
         return pd.DataFrame()
 
-    forecasts = dedup_forecasts(forecasts)
-
-    # evaluăm doar săptămâni închise
-    today = pd.Timestamp(date.today())
-    eligible = forecasts[forecasts["TargetDate"] <= today].copy()
+    today_ts = pd.Timestamp(date.today())
+    eligible = forecasts[forecasts["TargetDate"] < today_ts].copy()
     if eligible.empty:
         return pd.DataFrame()
 
+    # pregătire merge_asof (obligatoriu sort by + on)
     p = prices[["Date", "Ticker", "Region", "Close"]].copy()
-    p["Date"] = pd.to_datetime(p["Date"], errors="coerce")
-    p["Close"] = pd.to_numeric(p["Close"], errors="coerce")
-    p = p.dropna(subset=["Date", "Ticker", "Region", "Close"])
+    p = p.sort_values(["Ticker", "Region", "Date"])
 
-    # IMPORTANT: sortare pentru merge_asof (on + by)
-    by_cols = ["Ticker", "Region"]
-
-    eligible = _sort_for_asof(eligible, "WeekStart", by_cols)
-    p_sorted = _sort_for_asof(p, "Date", by_cols)
-
-    # Start forward merge
+    eligible = eligible.sort_values(["Ticker", "Region", "WeekStart"]).copy()
     start = pd.merge_asof(
         eligible,
-        p_sorted,
+        p,
         left_on="WeekStart",
         right_on="Date",
-        by=by_cols,
-        direction="forward",
+        by=["Ticker", "Region"],
+        direction="backward",
         suffixes=("", "_px"),
     ).rename(columns={"Date_px": "PriceDateStart", "Close": "CloseStart"})
 
-    # End backward merge
-    start = start.dropna(subset=["TargetDate"])
-    start = _sort_for_asof(start, "TargetDate", by_cols)
-
+    start = start.sort_values(["Ticker", "Region", "TargetDate"]).copy()
     end = pd.merge_asof(
         start,
-        p_sorted,
+        p,
         left_on="TargetDate",
         right_on="Date",
-        by=by_cols,
+        by=["Ticker", "Region"],
         direction="backward",
         suffixes=("", "_px2"),
     ).rename(columns={"Date_px2": "PriceDateEnd", "Close": "CloseEnd"})
 
-    df = end.dropna(subset=["CloseStart", "CloseEnd"]).copy()
+    df = end.copy()
+    df["Model_ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce")
+    df["Realized_Pct"] = (df["CloseEnd"] / df["CloseStart"] - 1.0) * 100.0
 
-    df["Realized_Pct"] = (df["CloseEnd"].astype(float) / df["CloseStart"].astype(float) - 1.0) * 100.0
-    df["Model_ER_Pct"] = df["ER_Pct"].astype(float)
     df["Error_Pct"] = df["Realized_Pct"] - df["Model_ER_Pct"]
     df["AbsError_Pct"] = df["Error_Pct"].abs()
 
-    model_dir = np.sign(df["Model_ER_Pct"].values)
-    real_dir = np.sign(df["Realized_Pct"].values)
-    df["DirectionHit"] = (model_dir == real_dir) & (model_dir != 0)
+    # direcție: HIT dacă semn identic și ambele non-zero
+    df["DirectionHit"] = 0
+    mask = (df["Realized_Pct"].abs() > 1e-12) & (df["Model_ER_Pct"].abs() > 1e-12)
+    df.loc[mask, "DirectionHit"] = (np.sign(df.loc[mask, "Realized_Pct"]) == np.sign(df.loc[mask, "Model_ER_Pct"])).astype(int)
 
-    cols = [
+    out_cols = [
         "WeekStart","TargetDate","Date","ModelVersion","Ticker","Region","HorizonDays",
         "Model_ER_Pct","CloseStart","CloseEnd","Realized_Pct","Error_Pct","AbsError_Pct","DirectionHit","Notes"
     ]
-    for c in cols:
+    for c in out_cols:
         if c not in df.columns:
             df[c] = pd.NA
 
-    return df[cols].sort_values(["WeekStart", "Region", "Ticker"], kind="mergesort").reset_index(drop=True)
+    return df[out_cols].copy()
 
 
 def summarize(eval_df: pd.DataFrame) -> pd.DataFrame:
-    if eval_df.empty:
-        return pd.DataFrame()
+    if eval_df is None or eval_df.empty:
+        return pd.DataFrame(columns=["WeekStart","ModelVersion","Region","n","hit_rate","mean_abs_error","mean_error","median_abs_error"])
 
-    g = eval_df.groupby(["WeekStart", "ModelVersion", "Region"])
-    s = g.agg(
+    g = eval_df.copy()
+    g["AbsError_Pct"] = pd.to_numeric(g["AbsError_Pct"], errors="coerce")
+    g["Error_Pct"] = pd.to_numeric(g["Error_Pct"], errors="coerce")
+    g["DirectionHit"] = pd.to_numeric(g["DirectionHit"], errors="coerce")
+
+    grp = g.groupby(["WeekStart","ModelVersion","Region"], dropna=False)
+    res = grp.agg(
         n=("Ticker","count"),
         hit_rate=("DirectionHit","mean"),
         mean_abs_error=("AbsError_Pct","mean"),
         mean_error=("Error_Pct","mean"),
         median_abs_error=("AbsError_Pct","median"),
     ).reset_index()
-    s["hit_rate"] = s["hit_rate"] * 100.0
-    return s.sort_values(["WeekStart","Region"], kind="mergesort").reset_index(drop=True)
+
+    return res
