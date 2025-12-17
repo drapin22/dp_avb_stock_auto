@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 import json
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -137,28 +137,57 @@ def _build_prompt(
     reg_records = region_summary.to_dict(orient="records")
 
     prompt = f"""
-You are {settings.MODEL_VERSION_TAG}, a systematic multi-region equity forecaster.
+Return STRICT JSON only, no prose, no markdown.
 
-Return JSON: {{ "forecasts": [{{"Ticker": "...", "Region": "RO|EU|US", "ER_Pct": number}}] }}
+Schema:
+{{
+  "forecasts": [
+    {{"Ticker":"...", "Region":"RO|EU|US", "ER_Pct": 0.0}}
+  ]
+}}
 
 Date: {as_of.isoformat()}
-Horizon: {horizon_days} days (about one trading week)
+HorizonDays: {horizon_days}
 
 Rules:
-- Conservative magnitudes, typical weekly ER within +/-10%.
-- If weak signal, ER near 0.
-- Use price-based context only (no live news).
+- Conservative magnitudes, typical weekly ER within +/-10.
+- If weak signal, ER close to 0.
+- Use only the provided price-based context.
 
 HOLDINGS:
 {json.dumps(hold_records, indent=2)}
 
-TICKER FEATURES:
+TICKER_FEATURES:
 {json.dumps(feat_records, indent=2)}
 
-REGION SUMMARY:
+REGION_SUMMARY:
 {json.dumps(reg_records, indent=2)}
-"""
-    return prompt.strip()
+""".strip()
+    return prompt
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """
+    Parsing defensiv: încearcă json direct; dacă nu merge, caută primul obiect { ... }.
+    """
+    if not text:
+        return None
+
+    t = text.strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+
+    first = t.find("{")
+    last = t.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        chunk = t[first:last + 1]
+        try:
+            return json.loads(chunk)
+        except Exception:
+            return None
+    return None
 
 
 def run_stockd_model(
@@ -168,10 +197,10 @@ def run_stockd_model(
     horizon_days: int,
 ) -> pd.DataFrame:
     """
-    Returnează DataFrame cu:
-      - Ticker, Region, ER_Pct
-      - EngineStatus: OK / FALLBACK_ZERO
-      - LastError: motiv scurt (doar la fallback)
+    Returnează:
+      Ticker, Region, ER_Pct
+      EngineStatus: OK / FALLBACK_ZERO
+      LastError: motiv scurt la fallback
     """
     if holdings.empty:
         return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct", "EngineStatus", "LastError"])
@@ -182,47 +211,38 @@ def run_stockd_model(
 
     ticker_features = _compute_ticker_features(prices_history, holdings)
     region_summary = _compute_region_summary(ticker_features)
-
     prompt = _build_prompt(holdings, ticker_features, region_summary, as_of, horizon_days)
 
-    schema: Dict[str, Any] = {
-        "name": "stockd_output",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "forecasts": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "Ticker": {"type": "string"},
-                            "Region": {"type": "string"},
-                            "ER_Pct": {"type": "number"},
-                        },
-                        "required": ["Ticker", "Region", "ER_Pct"],
-                    },
-                }
-            },
-            "required": ["forecasts"],
-            "additionalProperties": False,
-        },
-    }
+    system_msg = (
+        f"You are {settings.MODEL_VERSION_TAG}, a systematic multi-region equity forecaster. "
+        f"Output must be strict JSON matching the provided schema."
+    )
 
     last_err = None
     for attempt in range(1, 4):
         try:
-            response = client.responses.create(
+            resp = client.chat.completions.create(
                 model=settings.MODEL_NAME,
-                input=prompt,
-                response_format={"type": "json_schema", "json_schema": schema},
-                max_output_tokens=1200,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=900,
             )
-            raw_json = response.output[0].content[0].text
-            parsed = json.loads(raw_json)
-            forecasts = parsed.get("forecasts", [])
-            df = pd.DataFrame(forecasts)
+
+            content = resp.choices[0].message.content if resp.choices else ""
+            parsed = _extract_json_object(content)
+            if not parsed or "forecasts" not in parsed:
+                raise ValueError("Model output is not valid JSON or missing 'forecasts'.")
+
+            df = pd.DataFrame(parsed.get("forecasts", []))
             if df.empty:
-                raise ValueError("Empty forecasts from model response.")
+                raise ValueError("Empty forecasts from model output.")
+
+            for col in ["Ticker", "Region", "ER_Pct"]:
+                if col not in df.columns:
+                    raise ValueError(f"Missing column in forecasts: {col}")
 
             df["Ticker"] = df["Ticker"].astype(str)
             df["Region"] = df["Region"].astype(str)
