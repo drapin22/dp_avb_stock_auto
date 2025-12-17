@@ -171,7 +171,7 @@ def run_stockd_model(
     Returnează DataFrame cu:
       - Ticker, Region, ER_Pct
       - EngineStatus: OK / FALLBACK_ZERO
-      - LastError: text scurt cu motiv (doar la fallback)
+      - LastError: motiv scurt (doar la fallback)
     """
     if holdings.empty:
         return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct", "EngineStatus", "LastError"])
