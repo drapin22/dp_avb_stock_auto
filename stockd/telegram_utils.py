@@ -15,8 +15,8 @@ def _get_creds():
 def send_telegram_message(text: str) -> None:
     bot_token, chat_id = _get_creds()
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    r = requests.post(url, json=payload, timeout=15)
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    r = requests.post(url, json=payload, timeout=30)
     r.raise_for_status()
 
 
