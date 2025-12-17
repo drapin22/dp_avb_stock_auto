@@ -8,8 +8,10 @@ import os
 import numpy as np
 import pandas as pd
 import requests
+import matplotlib.pyplot as plt
 
 from stockd import settings
+from stockd.telegram_utils import send_telegram_document, send_telegram_photo
 
 
 # ------------ Utilitare de dată / fișiere -----------------
@@ -17,10 +19,9 @@ from stockd import settings
 
 def get_week_bounds(run_date: date) -> tuple[date, date]:
     """
-    Pentru orice zi, întoarce (week_start, week_end) pentru săptămâna Luni–Vineri
-    care S-A ÎNCHEIAT cel mai recent.
-
-    - Dacă rulezi sâmbătă -> săptămâna de Luni–Vineri care tocmai s-a terminat
+    Returnează (week_start, week_end) pentru săptămâna de raport.
+    Folosim convenția:
+    - Dacă rulezi sâmbătă/duminică -> săptămâna anterioară (lun-vin)
     - Dacă rulezi vineri -> săptămâna curentă (până astăzi)
     """
     # Câte zile au trecut de la ultimul vineri
@@ -37,69 +38,62 @@ def get_reports_dir() -> Path:
     return reports_dir
 
 
-# ------------ Încărcare date -----------------
+# ------------ Loaders -----------------
 
 
 def load_holdings_ro() -> pd.DataFrame:
-    path = settings.HOLDINGS_RO
-    if not path.exists():
-        return pd.DataFrame(columns=["Ticker"])
+    """
+    În repo-ul tău, holdings RO sunt definite în settings.HOLDINGS_RO
+    """
+    rows = []
+    for t in settings.HOLDINGS_RO:
+        rows.append({"Ticker": t, "Region": "RO"})
+    return pd.DataFrame(rows)
 
-    df = pd.read_csv(path)
-    if "Active" in df.columns:
-        df = df[df["Active"] == 1]
-    return df[["Ticker"]].drop_duplicates()
 
+def load_forecasts_for_week(week_start: date, week_end: date) -> pd.DataFrame:
+    """
+    Citește forecasts_stockd.csv și ia forecasturile pentru săptămâna curentă (WeekStart=week_start, TargetDate=week_end).
+    Păstrează ultima predicție per Ticker/Region (dacă ai duplicat pe Date).
+    """
+    fc_path = Path(settings.FORECASTS_CSV)
+    if not fc_path.exists():
+        print(f"[REPORT] Missing forecasts file: {fc_path}")
+        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
 
-def load_prices_week_ro(week_start: date, week_end: date, tickers: list[str]) -> pd.DataFrame:
-    if not settings.PRICES_HISTORY.exists():
-        return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
+    df = pd.read_csv(fc_path, parse_dates=["Date", "WeekStart", "TargetDate"])
+    df = df[(df["WeekStart"].dt.date == week_start) & (df["TargetDate"].dt.date == week_end)]
 
-    df = pd.read_csv(settings.PRICES_HISTORY)
-    df["Date"] = pd.to_datetime(df["Date"])
+    if df.empty:
+        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
 
-    mask = (
-        (df["Region"] == "RO")
-        & (df["Ticker"].isin(tickers))
-        & (df["Date"] >= pd.Timestamp(week_start))
-        & (df["Date"] <= pd.Timestamp(week_end))
+    # păstrează ultima predicție pentru combinația aceea
+    df = (
+        df.sort_values("Date")
+          .groupby(["WeekStart", "TargetDate", "Ticker", "Region"], as_index=False)
+          .tail(1)
     )
-    df = df[mask].copy()
+
+    return df[["Ticker", "Region", "ER_Pct"]].copy()
+
+
+def load_prices_for_week(week_start: date, week_end: date) -> pd.DataFrame:
+    """
+    În repo ai deja un fișier de prețuri unificat (sau un path în settings).
+    Dacă ai un alt path, ajustează settings.PRICES_ALL_CSV.
+    """
+    px_path = Path(getattr(settings, "PRICES_ALL_CSV", "data/prices_all.csv"))
+    if not px_path.exists():
+        print(f"[REPORT] Missing prices file: {px_path}")
+        return pd.DataFrame(columns=["Date", "Ticker", "Region", "Close"])
+
+    df = pd.read_csv(px_path, parse_dates=["Date"])
+    df = df[(df["Date"].dt.date >= week_start) & (df["Date"].dt.date <= week_end)].copy()
     df.sort_values(["Ticker", "Date"], inplace=True)
     return df
 
 
-def load_forecasts_ro(week_start: date, week_end: date) -> pd.DataFrame:
-    """Forecasturile StockD pentru săptămâna respectivă (RO)."""
-    forecasts_path = settings.DATA_DIR / "forecasts_stockd.csv"
-    if not forecasts_path.exists():
-        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
-
-    f = pd.read_csv(forecasts_path)
-    # Asigurăm formatele de dată
-    for col in ["Date", "WeekStart", "TargetDate"]:
-        if col in f.columns:
-            f[col] = pd.to_datetime(f[col]).dt.date
-
-    mask = (
-        (f["Region"] == "RO")
-        & (f["WeekStart"] == week_start)
-        & (f["TargetDate"] == week_end)
-    )
-    f = f[mask].copy()
-
-    if f.empty:
-        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
-
-    # Dacă există mai multe runde pentru același ticker în săptămâna asta,
-    # păstrăm ultima (după Date).
-    f.sort_values(["Ticker", "Date"], inplace=True)
-    f = f.drop_duplicates(subset=["Ticker", "Region"], keep="last")
-
-    return f[["Ticker", "Region", "ER_Pct"]]
-
-
-# ------------ Calcul raport -----------------
+# ------------ Model vs Real table -----------------
 
 
 def build_weekly_table(
@@ -124,29 +118,18 @@ def build_weekly_table(
             ]
         )
 
-    # Pivot cu prețurile de închidere pe zile
-    week_days = pd.date_range(week_start, week_end, freq="B")  # business days Mon–Fri
+    # păstrăm datele din săptămână și pivotăm în coloane Mon..Fri
+    prices = prices.copy()
+    prices["DOW"] = prices["Date"].dt.day_name().str[:3]  # Mon, Tue, Wed...
     pivot = prices.pivot_table(
         index=["Ticker", "Region"],
-        columns="Date",
+        columns="DOW",
         values="Close",
         aggfunc="last",
     )
 
-    # Asigurăm coloane pentru fiecare zi (chiar dacă lipsesc date – NaN)
-    for d in week_days:
-        if d not in pivot.columns:
-            pivot[d] = np.nan
-
-    pivot = pivot[sorted(pivot.columns)]  # ordonăm pe date
-
     # Redenumim în Mon/Tue/...
-    rename_map = {}
-    for d in week_days:
-        col_name = d.strftime("%a")  # Mon, Tue, ...
-        rename_map[d] = f"{col_name}_Close"
-    pivot.rename(columns=rename_map, inplace=True)
-
+    pivot.columns = [f"{c}_Close" for c in pivot.columns]
     pivot.reset_index(inplace=True)
 
     # Calcul actual weekly %: ultima cotație vs prima din săptămână
@@ -177,8 +160,13 @@ def build_weekly_table(
 
     merged["Verdict"] = merged.apply(verdict_row, axis=1)
 
-    # Ordine coloane
-    ordered_cols = [
+    # asigurăm coloane Mon..Fri chiar dacă lipsesc
+    for c in ["Mon_Close", "Tue_Close", "Wed_Close", "Thu_Close", "Fri_Close"]:
+        if c not in merged.columns:
+            merged[c] = np.nan
+
+    # ordonare
+    cols = [
         "Ticker",
         "Region",
         "Mon_Close",
@@ -190,15 +178,11 @@ def build_weekly_table(
         "Model_ER_Pct",
         "Verdict",
     ]
-    # Adăugăm doar coloanele care chiar există
-    ordered_cols = [c for c in ordered_cols if c in merged.columns]
-    merged = merged[ordered_cols]
-
-    return merged.sort_values("Ticker")
+    return merged[cols].sort_values(["Region", "Ticker"])
 
 
 def portfolio_metrics(weekly_table: pd.DataFrame) -> dict:
-    if weekly_table.empty:
+    if weekly_table is None or weekly_table.empty:
         return {
             "n_names": 0,
             "hit_rate": np.nan,
@@ -224,6 +208,55 @@ def portfolio_metrics(weekly_table: pd.DataFrame) -> dict:
     }
 
 
+def save_weekly_chart(
+    weekly_table: pd.DataFrame,
+    out_dir: Path,
+    week_start: date,
+    week_end: date,
+    top_n: int = 15,
+) -> Path | None:
+    """
+    Salvează un grafic PNG cu Model_ER_Pct vs Actual_Weekly_Pct.
+
+    Arată top_n tickere cu cea mai mare eroare absolută (ca să fie lizibil).
+    """
+    if weekly_table is None or weekly_table.empty:
+        return None
+
+    needed = {"Ticker", "Model_ER_Pct", "Actual_Weekly_Pct"}
+    if not needed.issubset(set(weekly_table.columns)):
+        print("[REPORT] Missing columns for chart. Skipping chart.")
+        return None
+
+    df = weekly_table[["Ticker", "Model_ER_Pct", "Actual_Weekly_Pct"]].copy()
+    df["AbsError"] = (df["Actual_Weekly_Pct"] - df["Model_ER_Pct"]).abs()
+    df = df.sort_values("AbsError", ascending=False).head(top_n)
+
+    tickers = df["Ticker"].astype(str).tolist()
+    x = np.arange(len(tickers))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.bar(x - width / 2, df["Model_ER_Pct"].values, width, label="Model ER (%)")
+    ax.bar(x + width / 2, df["Actual_Weekly_Pct"].values, width, label="Real (%)")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(tickers, rotation=45, ha="right")
+    ax.set_ylabel("Return weekly (%)")
+    ax.set_title(f"BVB – Model vs Real ({week_start.isoformat()} → {week_end.isoformat()})")
+    ax.legend()
+    fig.tight_layout()
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    chart_path = out_dir / f"weekly_bvb_model_vs_real_{week_end.isoformat()}.png"
+    fig.savefig(chart_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"[REPORT] Saved chart to {chart_path}")
+    return chart_path
+
+
 # ------------ Telegram -----------------
 
 
@@ -236,17 +269,17 @@ def send_telegram_message(text: str) -> None:
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
 
     try:
-        resp = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            print(f"[TELEGRAM] Error {resp.status_code}: {resp.text}")
-        else:
-            print("[TELEGRAM] Message sent.")
+        r = requests.post(url, json=payload, timeout=30)
+        r.raise_for_status()
+        print("[TELEGRAM] Message sent.")
     except Exception as exc:
         print(f"[TELEGRAM] Exception: {exc}")
 
@@ -261,41 +294,33 @@ def run_report(run_date: date | None = None) -> dict:
     week_start, week_end = get_week_bounds(run_date)
     print(f"[REPORT] Week = {week_start} -> {week_end}")
 
+    # Load data
     holdings_ro = load_holdings_ro()
-    tickers = sorted(holdings_ro["Ticker"].unique().tolist())
-    print(f"[REPORT] RO holdings count: {len(tickers)}")
+    forecasts = load_forecasts_for_week(week_start, week_end)
+    prices = load_prices_for_week(week_start, week_end)
 
-    prices = load_prices_week_ro(week_start, week_end, tickers)
-    print(f"[REPORT] Loaded {len(prices)} RO price rows for week.")
+    # Keep only holdings tickers (RO) + whatever forecast tickers exist for that week
+    tickers = set(holdings_ro["Ticker"].astype(str).tolist())
+    tickers |= set(forecasts["Ticker"].astype(str).tolist())
 
-    forecasts = load_forecasts_ro(week_start, week_end)
-    print(f"[REPORT] Loaded {len(forecasts)} RO forecasts for week.")
+    if not prices.empty:
+        prices = prices[prices["Ticker"].astype(str).isin(tickers)].copy()
 
+    # Weekly table
     weekly_table = build_weekly_table(prices, forecasts, week_start, week_end)
     metrics = portfolio_metrics(weekly_table)
 
-    # Salvăm în Excel
+    # Save Excel
     reports_dir = get_reports_dir()
-    out_name = f"weekly_bvb_model_vs_real_{week_end.isoformat()}.xlsx"
-    out_path = reports_dir / out_name
+    out_path = reports_dir / f"weekly_bvb_model_vs_real_{week_end.isoformat()}.xlsx"
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         weekly_table.to_excel(writer, index=False, sheet_name="Per_Ticker")
-        # sheet mic cu sumarul de portofoliu
+
         summary_df = pd.DataFrame(
             {
-                "Metric": [
-                    "WeekStart",
-                    "WeekEnd",
-                    "Names",
-                    "HitRate",
-                    "Mean_Model_ER_Pct",
-                    "Mean_Actual_Pct",
-                    "ER_Bias_Pct",
-                ],
+                "Metric": ["n_names", "hit_rate", "mean_model_er", "mean_actual", "er_bias"],
                 "Value": [
-                    week_start.isoformat(),
-                    week_end.isoformat(),
                     metrics["n_names"],
                     metrics["hit_rate"],
                     metrics["mean_model_er"],
@@ -332,21 +357,29 @@ def format_telegram_summary(info: dict) -> str:
     ]
 
     if hit_rate_pct is not None:
-        text_lines.append(f"Hit rate (sign): *{hit_rate_pct:.1f}%*")
+        text_lines.append(f"Directional hit rate: *{hit_rate_pct:.1f}%*")
     else:
-        text_lines.append("Hit rate (sign): n/a")
+        text_lines.append("Directional hit rate: _n/a_")
 
     if m["mean_model_er"] == m["mean_model_er"]:
-        text_lines.append(f"Mean model ER: *{m['mean_model_er']:.2f}%*")
+        text_lines.append(f"Avg model ER: *{m['mean_model_er']:.2f}%*")
+    else:
+        text_lines.append("Avg model ER: _n/a_")
+
     if m["mean_actual"] == m["mean_actual"]:
-        text_lines.append(f"Mean actual weekly: *{m['mean_actual']:.2f}%*")
+        text_lines.append(f"Avg actual weekly: *{m['mean_actual']:.2f}%*")
+    else:
+        text_lines.append("Avg actual weekly: _n/a_")
+
     if m["er_bias"] == m["er_bias"]:
         bias = m["er_bias"]
-        direction = "under-forecasted" if bias > 0 else "over-forecasted"
-        text_lines.append(f"ER bias: *{bias:.2f}%* ({direction} vs reality)")
+        bias_txt = f"{bias:+.2f}%"
+        text_lines.append(f"ER bias (actual - model): *{bias_txt}*")
+    else:
+        text_lines.append("ER bias: _n/a_")
 
     text_lines.append("")
-    text_lines.append("_Full per-ticker table saved in repo (reports/).*")
+    text_lines.append("_Excel report attached in this chat (plus chart)._")
 
     return "\n".join(text_lines)
 
@@ -354,7 +387,34 @@ def format_telegram_summary(info: dict) -> str:
 def run_report_and_notify() -> None:
     info = run_report()
     msg = format_telegram_summary(info)
+
+    # 1) mesaj text
     send_telegram_message(msg)
+
+    # 2) grafic PNG (Model vs Real)
+    try:
+        chart_path = save_weekly_chart(
+            weekly_table=info["weekly_table"],
+            out_dir=Path(info["excel_path"]).parent,
+            week_start=info["week_start"],
+            week_end=info["week_end"],
+        )
+        if chart_path is not None:
+            send_telegram_photo(
+                str(chart_path),
+                caption=f"BVB model vs real – {info['week_start'].isoformat()} → {info['week_end'].isoformat()}",
+            )
+    except Exception as exc:
+        print(f"[TELEGRAM] Could not send chart: {exc}")
+
+    # 3) Excel complet
+    try:
+        send_telegram_document(
+            str(info["excel_path"]),
+            caption=f"Weekly BVB model vs real – {info['week_start'].isoformat()} → {info['week_end'].isoformat()}",
+        )
+    except Exception as exc:
+        print(f"[TELEGRAM] Could not send Excel: {exc}")
 
 
 if __name__ == "__main__":
