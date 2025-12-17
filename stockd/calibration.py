@@ -2,158 +2,212 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Tuple
+
 import numpy as np
 import pandas as pd
+
 from stockd import settings
 
 
-def _fit_linear(pred: np.ndarray, real: np.ndarray) -> tuple[float, float]:
-    # OLS: real = alpha + beta * pred
-    if len(pred) < 3:
-        return 0.0, 1.0
-    v = float(np.var(pred))
-    if v <= 1e-12:
-        return 0.0, 1.0
-    beta = float(np.cov(pred, real, ddof=0)[0, 1] / v)
-    alpha = float(np.mean(real) - beta * np.mean(pred))
-    return alpha, beta
+def _calib_path() -> Path:
+    p = getattr(settings, "CALIBRATION_FILE", None)
+    if p is None:
+        return settings.DATA_DIR / "calibration.json"
+    return Path(p)
 
 
-def build_region_calibration(eval_df: pd.DataFrame) -> dict:
-    """
-    Învață calibrare pe regiune (alpha/beta) din evaluare.
-    Include "usable" ca să nu aplicăm calibrare degenerată.
-    """
-    if eval_df is None or eval_df.empty:
-        return {"version": 2, "regions": {}, "notes": "no data", "model_version_tag": settings.MODEL_VERSION_TAG}
-
-    regions = {}
-    for region, g in eval_df.groupby("Region"):
-        pred = g["Model_ER_Pct"].astype(float).to_numpy()
-        real = g["Realized_Pct"].astype(float).to_numpy()
-
-        n = int(len(pred))
-        mae = float(np.mean(np.abs(real - pred))) if n else float("nan")
-
-        std_pred = float(np.std(pred)) if n else 0.0
-        std_real = float(np.std(real)) if n else 0.0
-
-        # winsorize pentru robustete, doar dacă avem destule puncte
-        if n >= 20:
-            p_lo, p_hi = np.quantile(pred, [0.05, 0.95])
-            r_lo, r_hi = np.quantile(real, [0.05, 0.95])
-            pred_c = np.clip(pred, p_lo, p_hi)
-            real_c = np.clip(real, r_lo, r_hi)
-        else:
-            pred_c = pred
-            real_c = real
-
-        alpha, beta = _fit_linear(pred_c, real_c)
-
-        # Guardrails: dacă pred e aproape constant sau n prea mic, calibrarea devine “offset-only”
-        usable = True
-        reasons = []
-
-        if n < 12:
-            usable = False
-            reasons.append("too_few_points")
-
-        if std_pred < 0.10:
-            usable = False
-            reasons.append("pred_variance_too_low")
-
-        # dacă beta e aproape 0, practic doar alpha mută totul
-        if abs(beta) < 0.20 and abs(alpha) > 0.30:
-            usable = False
-            reasons.append("degenerate_beta_offset_only")
-
-        # Safety clamp pentru alpha/beta
-        alpha = float(np.clip(alpha, -3.0, 3.0))
-        beta = float(np.clip(beta, 0.0, 2.0))
-
-        regions[region] = {
-            "alpha": alpha,
-            "beta": beta,
-            "mae": float(mae),
-            "n": n,
-            "std_pred": float(std_pred),
-            "std_real": float(std_real),
-            "usable": bool(usable),
-            "reasons": reasons,
+def load_calibration() -> Dict[str, Any]:
+    path = _calib_path()
+    if not path.exists():
+        return {
+            "version": 2,
+            "updated_at": None,
+            "alpha": 0.20,
+            "regions": {
+                "RO": {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0},
+                "EU": {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0},
+                "US": {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0},
+            },
+            "ticker_caps": {},
+            "notes": "bootstrap calibration",
         }
-
-    return {
-        "version": 2,
-        "regions": regions,
-        "model_version_tag": settings.MODEL_VERSION_TAG,
-        "notes": "region-level calibration with usability gates",
-    }
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def save_calibration(calib: dict) -> None:
-    settings.CALIBRATION_FILE.write_text(json.dumps(calib, indent=2), encoding="utf-8")
+def save_calibration(calib: Dict[str, Any]) -> None:
+    path = _calib_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    calib["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(calib, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def load_calibration() -> dict:
-    if not settings.CALIBRATION_FILE.exists():
-        return {"version": 2, "regions": {}}
-    try:
-        return json.loads(settings.CALIBRATION_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"version": 2, "regions": {}}
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, x)))
 
 
-def apply_calibration(forecasts_df: pd.DataFrame, calib: dict) -> pd.DataFrame:
+def _ridge_fit_slope_intercept(x: np.ndarray, y: np.ndarray, lam: float) -> Tuple[float, float]:
     """
-    Adaugă:
-      - Adj_ER_Pct
-      - CalibApplied (True/False)
-      - CalibReason (string)
+    Fit y ≈ a + b*x (ridge pe b, a nepenalizat).
+    lam = strength (mai mare => b mai aproape de 1 prin shrink implicit)
     """
-    df = forecasts_df.copy()
-    if df.empty:
-        df["Adj_ER_Pct"] = df.get("ER_Pct", 0.0)
-        df["CalibApplied"] = False
-        df["CalibReason"] = "empty"
-        return df
+    if len(x) < 5:
+        return 0.0, 1.0  # bias=0, mult=1
 
-    regions = calib.get("regions", {}) if isinstance(calib, dict) else {}
+    x = x.astype(float)
+    y = y.astype(float)
 
-    adj_vals = []
-    applied = []
-    reason = []
+    x_mean = x.mean()
+    y_mean = y.mean()
+    xc = x - x_mean
+    yc = y - y_mean
+
+    denom = float((xc * xc).sum() + lam)
+    if denom <= 1e-12:
+        b = 1.0
+    else:
+        b = float((xc * yc).sum() / denom)
+
+    a = float(y_mean - b * x_mean)
+    return a, b
+
+
+def build_region_calibration(
+    eval_df: pd.DataFrame,
+    prior_strength: float = 50.0,
+) -> Dict[str, Any]:
+    """
+    Determinist: învață bias/mult pe regiune din istoricul săptămânilor evaluate.
+    prior_strength = ridge lambda (mai mare => update mai conservator)
+    """
+    base = load_calibration()
+
+    if eval_df is None or eval_df.empty:
+        base["notes"] = "no eval rows, kept previous calibration"
+        return base
+
+    df = eval_df.copy()
+    df["Region"] = df["Region"].astype(str)
+    df["Model_ER_Pct"] = pd.to_numeric(df["Model_ER_Pct"], errors="coerce")
+    df["Realized_Pct"] = pd.to_numeric(df["Realized_Pct"], errors="coerce")
+    df = df.dropna(subset=["Region", "Model_ER_Pct", "Realized_Pct"])
+
+    for region, g in df.groupby("Region"):
+        x = g["Model_ER_Pct"].values
+        y = g["Realized_Pct"].values
+        a, b = _ridge_fit_slope_intercept(x, y, lam=prior_strength)
+
+        # garduri: nu lăsăm mult/bias să sară prea tare
+        b = _clamp(b, 0.25, 2.50)
+        a = _clamp(a, -5.0, 5.0)
+
+        if "regions" not in base:
+            base["regions"] = {}
+        if region not in base["regions"]:
+            base["regions"][region] = {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0}
+
+        base["regions"][region]["mult"] = float(b)
+        base["regions"][region]["bias"] = float(a)
+        base["regions"][region]["n"] = int(len(g))
+
+    base["notes"] = "updated from eval_df via ridge fit"
+    return base
+
+
+def merge_coach_suggestions(
+    calib: Dict[str, Any],
+    coach: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Aplică sugestiile LLM doar în limite stricte.
+    Nu atinge mult/bias direct (decât prin build_region_calibration determinist).
+    """
+    out = json.loads(json.dumps(calib))  # deep copy
+
+    if not coach or coach.get("_coach_status") != "OK":
+        out["notes"] = (out.get("notes", "") + " | coach: skipped").strip()
+        return out
+
+    alpha = coach.get("alpha", out.get("alpha", 0.20))
+    out["alpha"] = _clamp(float(alpha), 0.05, 0.40)
+
+    regions = coach.get("regions", {}) or {}
+    out.setdefault("regions", {})
+    for reg, cfg in regions.items():
+        if reg not in out["regions"]:
+            out["regions"][reg] = {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0}
+        clip_pct = cfg.get("clip_pct", out["regions"][reg].get("clip_pct", 6.0))
+        out["regions"][reg]["clip_pct"] = _clamp(float(clip_pct), 1.0, 10.0)
+
+    # ticker caps: doar cap, nu “predicții”
+    caps = coach.get("ticker_overrides", []) or []
+    out.setdefault("ticker_caps", {})
+    for item in caps:
+        t = str(item.get("Ticker", "")).strip()
+        r = str(item.get("Region", "")).strip()
+        cap = item.get("multiplier_cap", None)
+        if not t or not r or cap is None:
+            continue
+        cap = _clamp(float(cap), 0.25, 2.50)
+        out["ticker_caps"][f"{t}::{r}"] = cap
+
+    out["notes"] = (out.get("notes", "") + " | coach: applied safe suggestions").strip()
+    return out
+
+
+def apply_calibration(pred_df: pd.DataFrame, calib: Dict[str, Any]) -> pd.DataFrame:
+    """
+    pred_df trebuie să aibă: Ticker, Region, ER_Pct
+    Returnează: Adj_ER_Pct + info coloane
+    """
+    df = pred_df.copy()
+    df["Ticker"] = df["Ticker"].astype(str)
+    df["Region"] = df["Region"].astype(str)
+    df["ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce").fillna(0.0)
+
+    regions = (calib.get("regions") or {})
+    ticker_caps = (calib.get("ticker_caps") or {})
+
+    adj = []
+    mult_used = []
+    bias_used = []
+    clip_used = []
+    cap_used = []
 
     for _, r in df.iterrows():
-        region = str(r.get("Region", "")).strip()
-        raw = float(r.get("ER_Pct", 0.0))
+        reg = r["Region"]
+        tkr = r["Ticker"]
+        er = float(r["ER_Pct"])
 
-        p = regions.get(region)
-        if not p:
-            adj_vals.append(raw)
-            applied.append(False)
-            reason.append("no_region_params")
-            continue
+        rcfg = regions.get(reg, {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0})
+        mult = float(rcfg.get("mult", 1.0))
+        bias = float(rcfg.get("bias", 0.0))
+        clip_pct = float(rcfg.get("clip_pct", 6.0))
 
-        usable = bool(p.get("usable", True))
-        if not usable:
-            adj_vals.append(raw)
-            applied.append(False)
-            reason.append("calib_not_usable:" + ",".join(p.get("reasons", [])))
-            continue
+        # ticker cap pe mult (opțional)
+        cap_key = f"{tkr}::{reg}"
+        cap = ticker_caps.get(cap_key, None)
+        if cap is not None:
+            mult = _clamp(mult, 0.25, float(cap))
+            cap_used.append(float(cap))
+        else:
+            cap_used.append(float("nan"))
 
-        alpha = float(p.get("alpha", 0.0))
-        beta = float(p.get("beta", 1.0))
-        adj = alpha + beta * raw
+        adj_er = bias + mult * er
+        adj_er = _clamp(adj_er, -clip_pct, clip_pct)
 
-        # clamp per region
-        max_abs = 8.0 if region in {"RO", "EU"} else 12.0
-        adj = float(np.clip(adj, -max_abs, max_abs))
+        adj.append(float(adj_er))
+        mult_used.append(float(mult))
+        bias_used.append(float(bias))
+        clip_used.append(float(clip_pct))
 
-        adj_vals.append(adj)
-        applied.append(True)
-        reason.append("ok")
-
-    df["Adj_ER_Pct"] = adj_vals
-    df["CalibApplied"] = applied
-    df["CalibReason"] = reason
+    df["Adj_ER_Pct"] = adj
+    df["CalibApplied"] = True
+    df["Calib_mult"] = mult_used
+    df["Calib_bias"] = bias_used
+    df["Calib_clip_pct"] = clip_used
+    df["Calib_mult_cap"] = cap_used
     return df
