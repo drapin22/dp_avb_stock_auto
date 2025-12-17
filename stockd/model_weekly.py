@@ -82,23 +82,6 @@ def save_forecasts_append(new_df: pd.DataFrame) -> None:
     print(f"[MODEL] Saved forecasts to {forecasts_path} (rows={len(combined)})")
 
 
-def _chunk_lines(lines: list[str], max_chars: int = 3500) -> list[str]:
-    chunks = []
-    current = []
-    current_len = 0
-    for ln in lines:
-        if current_len + len(ln) + 1 > max_chars and current:
-            chunks.append("\n".join(current))
-            current = [ln]
-            current_len = len(ln) + 1
-        else:
-            current.append(ln)
-            current_len += len(ln) + 1
-    if current:
-        chunks.append("\n".join(current))
-    return chunks
-
-
 def run_stockd_weekly_model() -> None:
     today = date.today()
     week_start = get_next_monday(today)
@@ -119,18 +102,20 @@ def run_stockd_weekly_model() -> None:
         horizon_days=horizon_days,
     )
 
-    merged = holdings.merge(preds[["Ticker", "Region", "ER_Pct", "EngineStatus"]], on=["Ticker", "Region"], how="left")
+    merged = holdings.merge(
+        preds[["Ticker", "Region", "ER_Pct", "EngineStatus", "LastError"]],
+        on=["Ticker", "Region"],
+        how="left",
+    )
     merged["ER_Pct"] = pd.to_numeric(merged["ER_Pct"], errors="coerce").fillna(0.0)
     merged["EngineStatus"] = merged["EngineStatus"].fillna("UNKNOWN")
+    merged["LastError"] = merged["LastError"].fillna("")
 
-    # Sanity: detectăm dacă modelul a dat practic 0 peste tot sau semnal constant
     er_std = float(np.std(merged["ER_Pct"].values)) if len(merged) else 0.0
     engine_ok = bool((merged["EngineStatus"] == "OK").all())
     low_signal = (er_std < 0.05)
 
     calib = load_calibration()
-
-    # Aplicăm calibrare DOAR dacă engine e OK și semnalul nu e degenerat
     if engine_ok and not low_signal:
         merged = apply_calibration(merged, calib)
     else:
@@ -138,7 +123,6 @@ def run_stockd_weekly_model() -> None:
         merged["CalibApplied"] = False
         merged["CalibReason"] = "skipped_engine_fallback" if not engine_ok else "skipped_low_signal"
 
-    # Persistăm forecasturile
     rows = []
     for _, r in merged.iterrows():
         rows.append({
@@ -152,6 +136,7 @@ def run_stockd_weekly_model() -> None:
             "ER_Pct": float(r["ER_Pct"]),
             "Adj_ER_Pct": float(r.get("Adj_ER_Pct", r["ER_Pct"])),
             "EngineStatus": str(r.get("EngineStatus", "")),
+            "LastError": str(r.get("LastError", "")),
             "CalibApplied": bool(r.get("CalibApplied", False)),
             "CalibReason": str(r.get("CalibReason", "")),
             "Notes": settings.FORECAST_NOTES,
@@ -160,11 +145,9 @@ def run_stockd_weekly_model() -> None:
     new_df = pd.DataFrame(rows)
     save_forecasts_append(new_df)
 
-    # CSV complet pe run
     run_csv = settings.REPORTS_DIR / f"weekly_forecast_{week_start.strftime('%Y-%m-%d')}_{target_date.strftime('%Y-%m-%d')}.csv"
     new_df.sort_values(["Region", "Adj_ER_Pct"], ascending=[True, False]).to_csv(run_csv, index=False)
 
-    # Telegram: mesaj corect, fără “top signals” false
     try:
         header = [
             "*StockD weekly forecast*",
@@ -175,25 +158,29 @@ def run_stockd_weekly_model() -> None:
         warnings = []
         if not engine_ok:
             warnings.append("Engine status: *FALLBACK* (OpenAI call failed or returned empty). Forecasts are neutral.")
+            last_err = str(merged["LastError"].iloc[0]) if len(merged) else ""
+            if last_err:
+                warnings.append(f"LastError: `{last_err[:180]}`")
+
         if low_signal and engine_ok:
             warnings.append("Model signal: *LOW VARIANCE* (near-constant outputs). Treat as low confidence.")
+
         if warnings:
             header += ["", "*Warnings:*"] + [f"- {w}" for w in warnings]
 
-        # Doar dacă avem semnal real, arătăm “Top 10”
         lines = []
         if engine_ok and not low_signal:
             lines += ["", "Top 10 signals (Adj_ER_Pct):"]
             top = new_df.sort_values(["Adj_ER_Pct"], ascending=False).head(10)
             for _, x in top.iterrows():
-                lines.append(f"- {x['Ticker']} ({x['Region']}): *{float(x['Adj_ER_Pct']):+.2f}%* (raw {float(x['ER_Pct']):+.2f}%)")
+                lines.append(
+                    f"- {x['Ticker']} ({x['Region']}): *{float(x['Adj_ER_Pct']):+.2f}%* (raw {float(x['ER_Pct']):+.2f}%)"
+                )
         else:
             lines += ["", "_Top signals hidden because forecasts are not reliable in this run._"]
 
         send_telegram_message("\n".join(header + lines))
         send_telegram_document(str(run_csv), caption=f"Full forecast list: {week_start} → {target_date}")
-
-        # Nu mai trimitem “restul” în chunks în mod implicit ca să evităm spam
     except Exception as exc:
         print(f"[MODEL] Telegram notify failed: {exc}")
 
