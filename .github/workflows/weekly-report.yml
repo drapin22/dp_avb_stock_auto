@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: weekly-report
+  group: repo-main-writer
   cancel-in-progress: false
 
 jobs:
@@ -21,7 +21,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
+
+      - name: Sync working copy with origin/main (avoid diverged history)
+        run: |
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+          git clean -fd
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,19 +55,31 @@ jobs:
         run: |
           python -m stockd.learning
 
-      - name: Commit weekly report + learning artifacts
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Weekly report + learning artifacts"
-          file_pattern: |
-            reports/weekly_bvb_model_vs_real_*.xlsx
-            reports/weekly_forecast_*.csv
-            reports/model_eval_detailed.csv
-            reports/model_eval_summary.csv
-            reports/mentor_postmortem_*.md
-            data/calibration.json
-            data/scores_stockd.csv
-            data/mentor_overrides.json
-          commit_user_name: "StockD Agent"
-          commit_user_email: "stockd@bot.com"
-          commit_author: "${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>"
+      - name: Commit and push artifacts (rebase-safe)
+        run: |
+          git config user.name "StockD Agent"
+          git config user.email "stockd@bot.com"
+
+          git add \
+            reports/weekly_bvb_model_vs_real_*.xlsx \
+            reports/weekly_forecast_*.csv \
+            reports/model_eval_detailed.csv \
+            reports/model_eval_summary.csv \
+            reports/mentor_postmortem_*.md \
+            reports/mentor_raw_*.txt \
+            data/calibration.json \
+            data/scores_stockd.csv \
+            data/mentor_overrides.json || true
+
+          if git diff --cached --quiet; then
+            echo "No artifact changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Weekly report + learning artifacts"
+
+          # integrate any new remote commits safely
+          git pull --rebase origin main
+
+          # push
+          git push origin HEAD:main
