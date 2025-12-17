@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -14,17 +13,18 @@ from stockd import settings
 
 
 def _calib_path() -> Path:
-    p = getattr(settings, "CALIBRATION_FILE", None)
-    if p is None:
-        return settings.DATA_DIR / "calibration.json"
-    return Path(p)
+    return getattr(settings, "CALIBRATION_FILE", settings.DATA_DIR / "calibration.json")
+
+
+def _mentor_overrides_path() -> Path:
+    return getattr(settings, "MENTOR_OVERRIDES_FILE", settings.DATA_DIR / "mentor_overrides.json")
 
 
 def load_calibration() -> Dict[str, Any]:
     path = _calib_path()
     if not path.exists():
         return {
-            "version": 2,
+            "version": 3,
             "updated_at": None,
             "alpha": 0.20,
             "regions": {
@@ -50,41 +50,22 @@ def _clamp(x: float, lo: float, hi: float) -> float:
 
 
 def _ridge_fit_slope_intercept(x: np.ndarray, y: np.ndarray, lam: float) -> Tuple[float, float]:
-    """
-    Fit y ≈ a + b*x (ridge pe b, a nepenalizat).
-    lam = strength (mai mare => b mai aproape de 1 prin shrink implicit)
-    """
-    if len(x) < 5:
-        return 0.0, 1.0  # bias=0, mult=1
-
+    if len(x) < 6:
+        return 0.0, 1.0
     x = x.astype(float)
     y = y.astype(float)
-
     x_mean = x.mean()
     y_mean = y.mean()
     xc = x - x_mean
     yc = y - y_mean
-
     denom = float((xc * xc).sum() + lam)
-    if denom <= 1e-12:
-        b = 1.0
-    else:
-        b = float((xc * yc).sum() / denom)
-
+    b = float((xc * yc).sum() / denom) if denom > 1e-12 else 1.0
     a = float(y_mean - b * x_mean)
     return a, b
 
 
-def build_region_calibration(
-    eval_df: pd.DataFrame,
-    prior_strength: float = 50.0,
-) -> Dict[str, Any]:
-    """
-    Determinist: învață bias/mult pe regiune din istoricul săptămânilor evaluate.
-    prior_strength = ridge lambda (mai mare => update mai conservator)
-    """
+def build_region_calibration(eval_df: pd.DataFrame, prior_strength: float = 50.0) -> Dict[str, Any]:
     base = load_calibration()
-
     if eval_df is None or eval_df.empty:
         base["notes"] = "no eval rows, kept previous calibration"
         return base
@@ -95,20 +76,16 @@ def build_region_calibration(
     df["Realized_Pct"] = pd.to_numeric(df["Realized_Pct"], errors="coerce")
     df = df.dropna(subset=["Region", "Model_ER_Pct", "Realized_Pct"])
 
+    base.setdefault("regions", {})
     for region, g in df.groupby("Region"):
         x = g["Model_ER_Pct"].values
         y = g["Realized_Pct"].values
         a, b = _ridge_fit_slope_intercept(x, y, lam=prior_strength)
 
-        # garduri: nu lăsăm mult/bias să sară prea tare
         b = _clamp(b, 0.25, 2.50)
         a = _clamp(a, -5.0, 5.0)
 
-        if "regions" not in base:
-            base["regions"] = {}
-        if region not in base["regions"]:
-            base["regions"][region] = {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0}
-
+        base["regions"].setdefault(region, {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0})
         base["regions"][region]["mult"] = float(b)
         base["regions"][region]["bias"] = float(a)
         base["regions"][region]["n"] = int(len(g))
@@ -117,52 +94,17 @@ def build_region_calibration(
     return base
 
 
-def merge_coach_suggestions(
-    calib: Dict[str, Any],
-    coach: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Aplică sugestiile LLM doar în limite stricte.
-    Nu atinge mult/bias direct (decât prin build_region_calibration determinist).
-    """
-    out = json.loads(json.dumps(calib))  # deep copy
-
-    if not coach or coach.get("_coach_status") != "OK":
-        out["notes"] = (out.get("notes", "") + " | coach: skipped").strip()
-        return out
-
-    alpha = coach.get("alpha", out.get("alpha", 0.20))
-    out["alpha"] = _clamp(float(alpha), 0.05, 0.40)
-
-    regions = coach.get("regions", {}) or {}
-    out.setdefault("regions", {})
-    for reg, cfg in regions.items():
-        if reg not in out["regions"]:
-            out["regions"][reg] = {"mult": 1.0, "bias": 0.0, "clip_pct": 6.0, "n": 0}
-        clip_pct = cfg.get("clip_pct", out["regions"][reg].get("clip_pct", 6.0))
-        out["regions"][reg]["clip_pct"] = _clamp(float(clip_pct), 1.0, 10.0)
-
-    # ticker caps: doar cap, nu “predicții”
-    caps = coach.get("ticker_overrides", []) or []
-    out.setdefault("ticker_caps", {})
-    for item in caps:
-        t = str(item.get("Ticker", "")).strip()
-        r = str(item.get("Region", "")).strip()
-        cap = item.get("multiplier_cap", None)
-        if not t or not r or cap is None:
-            continue
-        cap = _clamp(float(cap), 0.25, 2.50)
-        out["ticker_caps"][f"{t}::{r}"] = cap
-
-    out["notes"] = (out.get("notes", "") + " | coach: applied safe suggestions").strip()
-    return out
+def _load_mentor_overrides() -> Dict[str, Any]:
+    path = _mentor_overrides_path()
+    if not path.exists():
+        return {"status": "MISSING", "items": []}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"status": "INVALID", "items": []}
 
 
 def apply_calibration(pred_df: pd.DataFrame, calib: Dict[str, Any]) -> pd.DataFrame:
-    """
-    pred_df trebuie să aibă: Ticker, Region, ER_Pct
-    Returnează: Adj_ER_Pct + info coloane
-    """
     df = pred_df.copy()
     df["Ticker"] = df["Ticker"].astype(str)
     df["Region"] = df["Region"].astype(str)
@@ -171,11 +113,22 @@ def apply_calibration(pred_df: pd.DataFrame, calib: Dict[str, Any]) -> pd.DataFr
     regions = (calib.get("regions") or {})
     ticker_caps = (calib.get("ticker_caps") or {})
 
+    mentor = _load_mentor_overrides()
+    mentor_items = mentor.get("items", []) or []
+    mentor_map: Dict[str, Dict[str, Any]] = {}
+    for it in mentor_items:
+        t = str(it.get("Ticker", "")).strip()
+        r = str(it.get("Region", "")).strip()
+        if t and r:
+            mentor_map[f"{t}::{r}"] = it
+
     adj = []
     mult_used = []
     bias_used = []
     clip_used = []
     cap_used = []
+    mentor_clip_used = []
+    mentor_cap_used = []
 
     for _, r in df.iterrows():
         reg = r["Region"]
@@ -187,7 +140,7 @@ def apply_calibration(pred_df: pd.DataFrame, calib: Dict[str, Any]) -> pd.DataFr
         bias = float(rcfg.get("bias", 0.0))
         clip_pct = float(rcfg.get("clip_pct", 6.0))
 
-        # ticker cap pe mult (opțional)
+        # cap din calibrare (manual/learning)
         cap_key = f"{tkr}::{reg}"
         cap = ticker_caps.get(cap_key, None)
         if cap is not None:
@@ -195,6 +148,21 @@ def apply_calibration(pred_df: pd.DataFrame, calib: Dict[str, Any]) -> pd.DataFr
             cap_used.append(float(cap))
         else:
             cap_used.append(float("nan"))
+
+        # overrides de la mentor (safe)
+        m = mentor_map.get(cap_key)
+        m_clip = None
+        m_cap = None
+        if m:
+            if "clip_pct" in m:
+                m_clip = _clamp(float(m["clip_pct"]), 1.0, 10.0)
+                clip_pct = min(clip_pct, m_clip)  # doar mai conservator
+            if "multiplier_cap" in m:
+                m_cap = _clamp(float(m["multiplier_cap"]), 0.25, 2.50)
+                mult = min(mult, m_cap)  # doar mai conservator
+
+        mentor_clip_used.append(m_clip if m_clip is not None else float("nan"))
+        mentor_cap_used.append(m_cap if m_cap is not None else float("nan"))
 
         adj_er = bias + mult * er
         adj_er = _clamp(adj_er, -clip_pct, clip_pct)
@@ -210,4 +178,7 @@ def apply_calibration(pred_df: pd.DataFrame, calib: Dict[str, Any]) -> pd.DataFr
     df["Calib_bias"] = bias_used
     df["Calib_clip_pct"] = clip_used
     df["Calib_mult_cap"] = cap_used
+    df["Mentor_clip_pct_used"] = mentor_clip_used
+    df["Mentor_mult_cap_used"] = mentor_cap_used
+    df["Mentor_overrides_status"] = str(mentor.get("status", "MISSING"))
     return df
