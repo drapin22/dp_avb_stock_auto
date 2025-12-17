@@ -2,21 +2,25 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-import numpy as np
 import pandas as pd
-from openai import OpenAI
 
 from stockd import settings
 from stockd.news_rss import fetch_headlines_for_ticker
 
-client = OpenAI()
+# OpenAI import safe
+try:
+    from openai import OpenAI
+    _OPENAI_OK = True
+except Exception:
+    OpenAI = None  # type: ignore
+    _OPENAI_OK = False
 
 
-def _mentor_overrides_path() -> Path:
+def _overrides_path() -> Path:
     return getattr(settings, "MENTOR_OVERRIDES_FILE", settings.DATA_DIR / "mentor_overrides.json")
 
 
@@ -28,12 +32,11 @@ def _extract_json_object(text: str) -> Optional[dict]:
         return json.loads(t)
     except Exception:
         pass
-    first = t.find("{")
-    last = t.rfind("}")
-    if first != -1 and last != -1 and last > first:
-        chunk = t[first:last + 1]
+    a = t.find("{")
+    b = t.rfind("}")
+    if a != -1 and b != -1 and b > a:
         try:
-            return json.loads(chunk)
+            return json.loads(t[a:b + 1])
         except Exception:
             return None
     return None
@@ -43,71 +46,134 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return float(max(lo, min(hi, x)))
 
 
-def run_mentor_diagnostics(
-    eval_df: pd.DataFrame,
-    top_n: int = 8,
-    headlines_days: int = 12,
-) -> Dict[str, Any]:
+def _write_overrides(payload: dict) -> None:
+    p = _overrides_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -> Path:
+    md_path = settings.REPORTS_DIR / f"mentor_postmortem_{week_end.isoformat()}.md"
+
+    items = overrides.get("items", []) or []
+    idx = {(it.get("Ticker"), it.get("Region")): it for it in items}
+
+    lines: List[str] = []
+    lines.append(f"# StockD Mentor Postmortem ({week_end.isoformat()})\n")
+    lines.append("This report is generated from realized errors + RSS headlines. If evidence is insufficient, cause is UNKNOWN.\n")
+    lines.append("| Ticker | Region | Pred% | Real% | AbsErr pp | Cause | Conf | Overrides | Evidence |")
+    lines.append("|---|---|---:|---:|---:|---|---:|---|---|")
+
+    for _, r in worst.iterrows():
+        t = str(r.get("Ticker", ""))
+        reg = str(r.get("Region", ""))
+        pred = float(r.get("Model_ER_Pct", 0.0))
+        real = float(r.get("Realized_Pct", 0.0))
+        ab = float(r.get("AbsError_Pct", 0.0))
+
+        it = idx.get((t, reg), {})
+        cause = str(it.get("cause", "UNKNOWN"))
+        conf = float(it.get("confidence_0_1", 0.0))
+
+        ov = []
+        if "clip_pct" in it:
+            ov.append(f"clip={float(it['clip_pct']):.1f}")
+        if "multiplier_cap" in it:
+            ov.append(f"cap={float(it['multiplier_cap']):.2f}")
+        ov_txt = ", ".join(ov)
+
+        ev = it.get("evidence_headlines", []) or []
+        ev_txt = "; ".join([str(x) for x in ev[:2]])[:140]
+
+        lines.append(f"| {t} | {reg} | {pred:+.2f} | {real:+.2f} | {ab:.2f} | {cause} | {conf:.2f} | {ov_txt} | {ev_txt} |")
+
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path
+
+
+def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_days: int = 12) -> Dict[str, Any]:
     """
-    Ia cele mai mari greșeli din eval_df și încearcă să explice cauzele folosind headlines RSS.
-    Scrie mentor_overrides.json cu reguli safe (clip/cap).
-    Returnează dict cu rezumat + path override.
+    Backward compatible API used by stockd.learning:
+      run_mentor(last_week_eval_df, week_end=<date>)
+    Produces:
+      - data/mentor_overrides.json (safe guardrails)
+      - reports/mentor_postmortem_YYYY-MM-DD.md
+    Returns dict with status + md_path
     """
     if eval_df is None or eval_df.empty:
-        out = {"status": "NO_EVAL", "overrides_path": str(_mentor_overrides_path())}
-        _mentor_overrides_path().write_text(json.dumps({"status": "NO_EVAL"}, indent=2), encoding="utf-8")
-        return out
+        overrides = {"status": "NO_EVAL", "items": [], "global_notes": "No eval rows provided."}
+        _write_overrides(overrides)
+        return {"status": "NO_EVAL"}
 
     df = eval_df.copy()
-    df["AbsError_Pct"] = pd.to_numeric(df["AbsError_Pct"], errors="coerce")
-    df["Error_Pct"] = pd.to_numeric(df["Error_Pct"], errors="coerce")
-    df = df.dropna(subset=["Ticker", "Region", "AbsError_Pct", "Error_Pct"])
+    df["AbsError_Pct"] = pd.to_numeric(df.get("AbsError_Pct"), errors="coerce")
+    df["Error_Pct"] = pd.to_numeric(df.get("Error_Pct"), errors="coerce")
+    df["Model_ER_Pct"] = pd.to_numeric(df.get("Model_ER_Pct"), errors="coerce")
+    df["Realized_Pct"] = pd.to_numeric(df.get("Realized_Pct"), errors="coerce")
+
+    df = df.dropna(subset=["Ticker", "Region", "AbsError_Pct", "Model_ER_Pct", "Realized_Pct"])
+    if df.empty:
+        overrides = {"status": "NO_VALID_ROWS", "items": [], "global_notes": "All rows invalid after cleaning."}
+        _write_overrides(overrides)
+        return {"status": "NO_VALID_ROWS"}
 
     worst = df.sort_values("AbsError_Pct", ascending=False).head(top_n).copy()
 
-    # colectăm headlines
-    headlines_all = []
+    # headlines RSS
+    head_payload = []
     for _, r in worst.iterrows():
         t = str(r["Ticker"])
         reg = str(r["Region"])
         h = fetch_headlines_for_ticker(t, reg, since_days=headlines_days, max_items=10)
-        if not h.empty:
-            headlines_all.append(h)
+        if h is None or h.empty:
+            continue
+        for _, hr in h.head(6).iterrows():
+            head_payload.append({
+                "Ticker": t,
+                "Region": reg,
+                "PublishedAt": str(hr.get("PublishedAt", "")),
+                "Headline": str(hr.get("Headline", "")),
+                "Link": str(hr.get("Link", "")),
+                "Query": str(hr.get("Query", "")),
+            })
 
-    headlines_df = pd.concat(headlines_all, ignore_index=True) if headlines_all else pd.DataFrame(
-        columns=["PublishedAt", "Ticker", "Region", "Headline", "Link", "Source", "Query"]
-    )
+    # Dacă nu avem OpenAI sau nu avem key, facem fallback safe: UNKNOWN, fără overrides
+    api_key_present = bool(__import__("os").getenv("OPENAI_API_KEY", "").strip())
+    if not _OPENAI_OK or not api_key_present:
+        overrides = {
+            "status": "SKIPPED_NO_OPENAI",
+            "items": [
+                {
+                    "Ticker": str(r["Ticker"]),
+                    "Region": str(r["Region"]),
+                    "cause": "UNKNOWN",
+                    "confidence_0_1": 0.0,
+                    "evidence_headlines": [],
+                }
+                for _, r in worst.iterrows()
+            ],
+            "global_notes": "OpenAI not available or OPENAI_API_KEY missing. Generated UNKNOWN diagnostics only.",
+        }
+        _write_overrides(overrides)
+        md_path = _build_postmortem_md(worst, overrides, week_end)
+        return {"status": "SKIPPED_NO_OPENAI", "md_path": str(md_path)}
 
-    # payload scurt și auditabil
+    # LLM mentor
+    client = OpenAI()
+
     worst_payload = worst[[
         "Ticker", "Region", "WeekStart", "TargetDate",
         "Model_ER_Pct", "Realized_Pct", "Error_Pct", "AbsError_Pct", "DirectionHit"
     ]].to_dict(orient="records")
 
-    head_payload = []
-    if not headlines_df.empty:
-        headlines_df["PublishedAt"] = headlines_df["PublishedAt"].astype(str)
-        # limităm la 6 per ticker ca să nu explodeze promptul
-        for (tkr, reg), g in headlines_df.groupby(["Ticker", "Region"], sort=False):
-            for _, hr in g.head(6).iterrows():
-                head_payload.append({
-                    "Ticker": tkr,
-                    "Region": reg,
-                    "PublishedAt": hr["PublishedAt"],
-                    "Headline": hr["Headline"],
-                    "Source": hr.get("Source", ""),
-                    "Link": hr.get("Link", ""),
-                })
-
     system = (
-        "You are StockD Mentor. "
-        "Your job is post-mortem diagnosis of forecast errors using ONLY the provided headlines. "
-        "If evidence is insufficient, answer UNKNOWN. "
-        "Output STRICT JSON only. No prose."
+        "You are StockD Mentor. Diagnose forecast errors using ONLY the provided headlines and numeric data. "
+        "If evidence is insufficient, output cause UNKNOWN. "
+        "Return STRICT JSON only, no prose."
     )
 
     user = {
-        "task": "Diagnose why the forecast was wrong and propose safe guardrail overrides.",
+        "task": "Post-mortem diagnosis of why forecast was wrong, plus conservative safe guardrails for next time.",
         "allowed_causes": [
             "EARNINGS", "MACRO", "POLICY_REGULATION", "SECTOR", "COMPANY_NEWS",
             "LIQUIDITY_MICROSTRUCTURE", "FX_RATES", "TECHNICALS", "UNKNOWN"
@@ -126,16 +192,13 @@ def run_mentor_diagnostics(
         "output_schema": {
             "diagnostics": [
                 {
-                    "Ticker": "FP",
+                    "Ticker": "X",
                     "Region": "RO",
-                    "cause": "EARNINGS",
-                    "confidence_0_1": 0.6,
+                    "cause": "UNKNOWN",
+                    "confidence_0_1": 0.3,
                     "evidence_headlines": ["..."],
-                    "what_to_learn_next_time": ["..."],
-                    "safe_overrides": {
-                        "clip_pct": 5.0,
-                        "multiplier_cap": 1.2
-                    }
+                    "safe_overrides": {"clip_pct": 5.0, "multiplier_cap": 1.2},
+                    "what_to_learn_next_time": ["..."]
                 }
             ],
             "global_notes": "..."
@@ -156,41 +219,40 @@ def run_mentor_diagnostics(
 
     content = resp.choices[0].message.content if resp.choices else ""
     parsed = _extract_json_object(content)
-    if not parsed or "diagnostics" not in parsed:
-        overrides = {"status": "LLM_INVALID", "raw": content[:600]}
-        _mentor_overrides_path().write_text(json.dumps(overrides, indent=2), encoding="utf-8")
-        return {"status": "LLM_INVALID", "overrides_path": str(_mentor_overrides_path()), "raw": content[:600]}
 
-    # construim overrides safe
-    overrides: Dict[str, Any] = {"status": "OK", "items": []}
+    if not parsed or "diagnostics" not in parsed:
+        overrides = {"status": "LLM_INVALID", "items": [], "global_notes": content[:800]}
+        _write_overrides(overrides)
+        md_path = _build_postmortem_md(worst, overrides, week_end)
+        return {"status": "LLM_INVALID", "md_path": str(md_path)}
+
+    overrides: Dict[str, Any] = {"status": "OK", "items": [], "global_notes": str(parsed.get("global_notes", ""))[:800]}
+
     for d in parsed.get("diagnostics", []):
         t = str(d.get("Ticker", "")).strip()
-        r = str(d.get("Region", "")).strip()
+        reg = str(d.get("Region", "")).strip()
+        cause = str(d.get("cause", "UNKNOWN")).strip()
+        conf = _clamp(float(d.get("confidence_0_1", 0.2)), 0.0, 1.0)
+
         so = d.get("safe_overrides", {}) or {}
-        clip_pct = so.get("clip_pct", None)
-        mult_cap = so.get("multiplier_cap", None)
+        item = {"Ticker": t, "Region": reg, "cause": cause, "confidence_0_1": conf}
 
-        item = {"Ticker": t, "Region": r}
-
-        if clip_pct is not None:
-            item["clip_pct"] = _clamp(float(clip_pct), 1.0, 10.0)
-        if mult_cap is not None:
-            item["multiplier_cap"] = _clamp(float(mult_cap), 0.25, 2.50)
-
-        item["cause"] = str(d.get("cause", "UNKNOWN"))
-        item["confidence_0_1"] = _clamp(float(d.get("confidence_0_1", 0.2)), 0.0, 1.0)
+        # evidence limited
         item["evidence_headlines"] = (d.get("evidence_headlines", []) or [])[:4]
+
+        # safe overrides (optional)
+        if "clip_pct" in so:
+            item["clip_pct"] = _clamp(float(so["clip_pct"]), 1.0, 10.0)
+        if "multiplier_cap" in so:
+            item["multiplier_cap"] = _clamp(float(so["multiplier_cap"]), 0.25, 2.50)
+
         overrides["items"].append(item)
 
-    overrides["global_notes"] = str(parsed.get("global_notes", ""))[:600]
+    _write_overrides(overrides)
+    md_path = _build_postmortem_md(worst, overrides, week_end)
+    return {"status": "OK", "md_path": str(md_path)}
 
-    _mentor_overrides_path().parent.mkdir(parents=True, exist_ok=True)
-    _mentor_overrides_path().write_text(json.dumps(overrides, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    return {
-        "status": "OK",
-        "overrides_path": str(_mentor_overrides_path()),
-        "n_cases": int(len(worst)),
-        "n_headlines": int(len(head_payload)),
-        "global_notes": overrides.get("global_notes", ""),
-    }
+# Optional alias: some code versions used run_mentor_diagnostics name
+def run_mentor_diagnostics(eval_df: pd.DataFrame, week_end: date, **kwargs) -> Dict[str, Any]:
+    return run_mentor(eval_df, week_end=week_end, **kwargs)
