@@ -171,9 +171,10 @@ def run_stockd_model(
     Returnează DataFrame cu:
       - Ticker, Region, ER_Pct
       - EngineStatus: OK / FALLBACK_ZERO
+      - LastError: text scurt cu motiv (doar la fallback)
     """
     if holdings.empty:
-        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct", "EngineStatus"])
+        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct", "EngineStatus", "LastError"])
 
     holdings = holdings[["Ticker", "Region"]].drop_duplicates().copy()
     holdings["Ticker"] = holdings["Ticker"].astype(str)
@@ -207,7 +208,7 @@ def run_stockd_model(
         },
     }
 
-    last_exc = None
+    last_err = None
     for attempt in range(1, 4):
         try:
             response = client.responses.create(
@@ -220,7 +221,6 @@ def run_stockd_model(
             parsed = json.loads(raw_json)
             forecasts = parsed.get("forecasts", [])
             df = pd.DataFrame(forecasts)
-
             if df.empty:
                 raise ValueError("Empty forecasts from model response.")
 
@@ -231,16 +231,18 @@ def run_stockd_model(
             merged = holdings.merge(df[["Ticker", "Region", "ER_Pct"]], on=["Ticker", "Region"], how="left")
             merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
             merged["EngineStatus"] = "OK"
+            merged["LastError"] = ""
             return merged
 
         except Exception as exc:
-            last_exc = exc
+            last_err = f"{type(exc).__name__}: {exc}"
             sleep_s = 2 ** attempt
-            print(f"[STOCKD] OpenAI call failed (attempt {attempt}/3): {exc}. Retrying in {sleep_s}s")
+            print(f"[STOCKD] OpenAI call failed (attempt {attempt}/3): {last_err}. Retrying in {sleep_s}s")
             time.sleep(sleep_s)
 
-    print(f"[STOCKD] ERROR calling OpenAI after retries: {last_exc}")
+    print(f"[STOCKD] ERROR calling OpenAI after retries: {last_err}")
     fb = holdings.copy()
     fb["ER_Pct"] = 0.0
     fb["EngineStatus"] = "FALLBACK_ZERO"
+    fb["LastError"] = last_err or "unknown"
     return fb
