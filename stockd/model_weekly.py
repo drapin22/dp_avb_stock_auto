@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 import os
 import pandas as pd
 
 from stockd import settings
 from stockd.engine import run_stockd_model
-from stockd.telegram_utils import send_telegram_message
 from stockd.calibration import load_calibration, apply_calibration
+from stockd.telegram_utils import send_telegram_message, send_telegram_document
 
 
 def get_next_monday(d: date) -> date:
@@ -27,7 +28,7 @@ def load_all_holdings() -> pd.DataFrame:
 
     dfs: list[pd.DataFrame] = []
     for path, region_default in sources:
-        if not path.exists():
+        if not Path(path).exists():
             continue
         df = pd.read_csv(path)
         if "Active" in df.columns:
@@ -41,14 +42,17 @@ def load_all_holdings() -> pd.DataFrame:
     if not dfs:
         return pd.DataFrame(columns=["Ticker", "Region"])
 
-    return pd.concat(dfs, ignore_index=True).drop_duplicates().reset_index(drop=True)
+    out = pd.concat(dfs, ignore_index=True).drop_duplicates().reset_index(drop=True)
+    out["Ticker"] = out["Ticker"].astype(str)
+    out["Region"] = out["Region"].astype(str)
+    return out
 
 
 def load_prices_history() -> pd.DataFrame:
     if not settings.PRICES_HISTORY.exists():
         return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
     df = pd.read_csv(settings.PRICES_HISTORY)
-    df["Date"] = pd.to_datetime(df["Date"])
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     return df
 
 
@@ -63,20 +67,40 @@ def save_forecasts_append(new_df: pd.DataFrame) -> None:
         combined = new_df.copy()
 
     # Dedup corect: aceeași săptămână/ticker/regiune/model -> păstrează ultima Date
-    combined["Date"] = pd.to_datetime(combined["Date"])
-    combined["WeekStart"] = pd.to_datetime(combined["WeekStart"])
-    combined["TargetDate"] = pd.to_datetime(combined["TargetDate"])
+    combined["Date"] = pd.to_datetime(combined["Date"], errors="coerce")
+    combined["WeekStart"] = pd.to_datetime(combined["WeekStart"], errors="coerce")
+    combined["TargetDate"] = pd.to_datetime(combined["TargetDate"], errors="coerce")
 
     key = ["WeekStart", "TargetDate", "Ticker", "Region", "ModelVersion"]
     combined = combined.sort_values("Date").groupby(key, as_index=False).tail(1).reset_index(drop=True)
 
-    # back to strings
+    # back to strings (ca să păstrăm format CSV consistent)
     combined["Date"] = combined["Date"].dt.strftime("%Y-%m-%d")
     combined["WeekStart"] = combined["WeekStart"].dt.strftime("%Y-%m-%d")
     combined["TargetDate"] = combined["TargetDate"].dt.strftime("%Y-%m-%d")
 
     combined.to_csv(forecasts_path, index=False)
     print(f"[MODEL] Saved forecasts to {forecasts_path} (rows={len(combined)})")
+
+
+def _chunk_lines(lines: list[str], max_chars: int = 3500) -> list[str]:
+    """
+    Telegram are limită (aprox 4096). Folosim 3500 ca buffer safe.
+    """
+    chunks = []
+    current = []
+    current_len = 0
+    for ln in lines:
+        if current_len + len(ln) + 1 > max_chars and current:
+            chunks.append("\n".join(current))
+            current = [ln]
+            current_len = len(ln) + 1
+        else:
+            current.append(ln)
+            current_len += len(ln) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 def run_stockd_weekly_model() -> None:
@@ -102,10 +126,10 @@ def run_stockd_weekly_model() -> None:
     merged = holdings.merge(preds[["Ticker", "Region", "ER_Pct"]], on=["Ticker", "Region"], how="left")
     merged["ER_Pct"] = pd.to_numeric(merged["ER_Pct"], errors="coerce").fillna(0.0)
 
-    # calibrare (învață din istoric)
     calib = load_calibration()
-    merged = apply_calibration(merged.rename(columns={"ER_Pct": "ER_Pct"}), calib)
+    merged = apply_calibration(merged, calib)
 
+    # Construim rândurile de scris în CSV
     rows = []
     for _, r in merged.iterrows():
         rows.append({
@@ -124,20 +148,43 @@ def run_stockd_weekly_model() -> None:
     new_df = pd.DataFrame(rows)
     save_forecasts_append(new_df)
 
-    # Telegram: sumar scurt, stabil
+    # Salvează și un CSV “run-only” pentru Telegram (lista completă)
+    run_csv = settings.REPORTS_DIR / f"weekly_forecast_{week_start.strftime('%Y-%m-%d')}_{target_date.strftime('%Y-%m-%d')}.csv"
+    new_df.sort_values(["Region", "Adj_ER_Pct"], ascending=[True, False]).to_csv(run_csv, index=False)
+
+    # Telegram: Top 10 + atașament cu toate
     try:
         msg_lines = [
             "*StockD weekly forecast*",
             f"Week: *{week_start}* → *{target_date}*",
+            f"Universe: *{len(new_df)}* tickers",
             "",
-            "Top signals (Adj_ER_Pct):",
+            "Top 10 signals (Adj_ER_Pct):",
         ]
         top = new_df.sort_values(["Adj_ER_Pct"], ascending=False).head(10)
         for _, x in top.iterrows():
-            msg_lines.append(f"- {x['Ticker']} ({x['Region']}): *{float(x['Adj_ER_Pct']):+.2f}%* (raw {float(x['ER_Pct']):+.2f}%)")
+            msg_lines.append(
+                f"- {x['Ticker']} ({x['Region']}): *{float(x['Adj_ER_Pct']):+.2f}%* (raw {float(x['ER_Pct']):+.2f}%)"
+            )
+
         send_telegram_message("\n".join(msg_lines))
+
+        # Atașament cu toate
+        send_telegram_document(str(run_csv), caption=f"Full forecast list: {week_start} → {target_date}")
+
+        # Opțional: trimite și restul tickere-lor în mesaje chunked
+        rest = new_df.sort_values(["Adj_ER_Pct"], ascending=False).iloc[10:]
+        if not rest.empty:
+            lines = ["", "Remaining tickers (Adj_ER_Pct):"]
+            for _, x in rest.iterrows():
+                lines.append(f"- {x['Ticker']} ({x['Region']}): {float(x['Adj_ER_Pct']):+.2f}% (raw {float(x['ER_Pct']):+.2f}%)")
+
+            chunks = _chunk_lines(lines)
+            for chunk in chunks[:5]:  # limităm ca să nu spamăm
+                send_telegram_message(chunk)
+
     except Exception as exc:
-        print(f"[MODEL] Telegram summary failed: {exc}")
+        print(f"[MODEL] Telegram notify failed: {exc}")
 
 
 if __name__ == "__main__":
