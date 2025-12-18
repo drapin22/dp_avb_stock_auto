@@ -220,7 +220,7 @@ def run_learning() -> None:
 
     try:
         from stockd.mentor import run_mentor
-        mentor_info = run_mentor(eval_df, week_end=week_end)
+        mentor_info = run_mentor(eval_df, week_end=str(week_end))
         mentor_status = str(mentor_info.get("status", "OK"))
         mentor_err = str(mentor_info.get("error", ""))[:200]
         mentor_md_path = mentor_info.get("md_path")
