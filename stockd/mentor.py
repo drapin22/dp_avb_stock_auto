@@ -19,6 +19,9 @@ except Exception:
     _OPENAI_OK = False
 
 
+RELEVANCE_MIN = 0.55  # must match news_rss.py
+
+
 def _overrides_path() -> Path:
     return getattr(settings, "MENTOR_OVERRIDES_FILE", settings.DATA_DIR / "mentor_overrides.json")
 
@@ -29,32 +32,20 @@ def _raw_path(week_end: date) -> Path:
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
-    """
-    Acceptă:
-      - JSON dict direct
-      - JSON dict înconjurat de markdown fences
-      - JSON “dublu-encodat” (string care conține JSON cu escape-uri)
-      - JSON cu text înainte/după (extrage primul {...} complet)
-    """
     if not text:
         return None
 
     t = text.strip()
-
-    # Curăță fences markdown
     if t.startswith("```"):
         t = t.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
 
     def _loads_once(s: str) -> Any:
         return json.loads(s)
 
-    # 1) Încercare directă
     try:
         obj = _loads_once(t)
         if isinstance(obj, dict):
             return obj
-
-        # 2) JSON dublu-encodat: obj e string care conține JSON
         if isinstance(obj, str):
             s2 = obj.strip()
             try:
@@ -62,10 +53,7 @@ def _extract_json_object(text: str) -> Optional[dict]:
                 if isinstance(obj2, dict):
                     return obj2
             except Exception:
-                # dacă nu merge, încercăm extractor pe string
                 pass
-
-            # încercare cu substring { ... } în interiorul stringului
             a2 = s2.find("{")
             b2 = s2.rfind("}")
             if a2 != -1 and b2 != -1 and b2 > a2:
@@ -76,12 +64,10 @@ def _extract_json_object(text: str) -> Optional[dict]:
                         return obj2
                 except Exception:
                     return None
-
         return None
     except Exception:
         pass
 
-    # 3) Fallback: extrage primul { ... } complet din text
     a = t.find("{")
     b = t.rfind("}")
     if a != -1 and b != -1 and b > a:
@@ -90,7 +76,6 @@ def _extract_json_object(text: str) -> Optional[dict]:
             obj = json.loads(chunk)
             if isinstance(obj, dict):
                 return obj
-
             if isinstance(obj, str):
                 try:
                     obj2 = json.loads(obj)
@@ -117,7 +102,6 @@ def _write_overrides(payload: dict) -> None:
 def _to_json_safe(obj: Any) -> Any:
     if obj is None:
         return None
-
     if isinstance(obj, pd.Timestamp):
         if pd.isna(obj):
             return None
@@ -154,7 +138,7 @@ def _to_json_safe(obj: Any) -> Any:
     return str(obj)
 
 
-def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -> Path:
+def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date, coverage: dict) -> Path:
     md_path = settings.REPORTS_DIR / f"mentor_postmortem_{week_end.isoformat()}.md"
 
     items = overrides.get("items", []) or []
@@ -162,9 +146,9 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
 
     lines: List[str] = []
     lines.append(f"# StockD Mentor Postmortem ({week_end.isoformat()})\n")
-    lines.append("Generated from realized errors + RSS headlines. If evidence is insufficient, cause is UNKNOWN.\n")
-    lines.append("| Ticker | Region | Pred% | Real% | AbsErr pp | Cause | Conf | Overrides | Evidence |")
-    lines.append("|---|---|---:|---:|---:|---|---:|---|---|")
+    lines.append("Mentor uses ONLY provided headlines. If coverage is low, outputs UNKNOWN.\n")
+    lines.append("| Ticker | Region | Pred% | Real% | AbsErr pp | NewsCov | Cause | Conf | Overrides | Evidence |")
+    lines.append("|---|---|---:|---:|---:|---:|---|---:|---|---|")
 
     for _, r in worst.iterrows():
         t = str(r.get("Ticker", ""))
@@ -172,6 +156,8 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
         pred = float(r.get("Model_ER_Pct", 0.0))
         real = float(r.get("Realized_Pct", 0.0))
         ab = float(r.get("AbsError_Pct", 0.0))
+
+        cov = coverage.get(f"{t}|{reg}", 0)
 
         it = idx.get((t, reg), {})
         cause = str(it.get("cause", "UNKNOWN"))
@@ -187,7 +173,7 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
         ev = it.get("evidence_headlines", []) or []
         ev_txt = "; ".join([str(x) for x in ev[:2]])[:160]
 
-        lines.append(f"| {t} | {reg} | {pred:+.2f} | {real:+.2f} | {ab:.2f} | {cause} | {conf:.2f} | {ov_txt} | {ev_txt} |")
+        lines.append(f"| {t} | {reg} | {pred:+.2f} | {real:+.2f} | {ab:.2f} | {cov} | {cause} | {conf:.2f} | {ov_txt} | {ev_txt} |")
 
     md_path.write_text("\n".join(lines), encoding="utf-8")
     return md_path
@@ -196,7 +182,6 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
 def _call_mentor_llm(client: OpenAI, model_name: str, system: str, user_payload: dict) -> str:
     user_text = json.dumps(_to_json_safe(user_payload), ensure_ascii=False)
 
-    # încercare cu response_format dacă SDK suportă
     try:
         resp = client.chat.completions.create(
             model=model_name,
@@ -246,13 +231,25 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
 
     worst = df.sort_values("AbsError_Pct", ascending=False).head(top_n).copy()
 
+    # build headlines payload with relevance filter
     head_payload: List[Dict[str, Any]] = []
+    coverage: Dict[str, int] = {}
+
     for _, r in worst.iterrows():
         t = str(r["Ticker"])
         reg = str(r["Region"])
         h = fetch_headlines_for_ticker(t, reg, since_days=headlines_days, max_items=10)
+
         if h is None or h.empty:
+            coverage[f"{t}|{reg}"] = 0
             continue
+
+        # if Relevance column exists, keep only above threshold
+        if "Relevance" in h.columns:
+            h = h[pd.to_numeric(h["Relevance"], errors="coerce").fillna(0.0) >= RELEVANCE_MIN]
+
+        coverage[f"{t}|{reg}"] = int(len(h))
+
         for _, hr in h.head(6).iterrows():
             head_payload.append({
                 "Ticker": t,
@@ -261,6 +258,7 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
                 "Headline": hr.get("Headline", ""),
                 "Link": hr.get("Link", ""),
                 "Query": hr.get("Query", ""),
+                "Relevance": float(hr.get("Relevance", 1.0)) if "Relevance" in hr else 1.0,
             })
 
     api_key_present = bool(os.getenv("OPENAI_API_KEY", "").strip())
@@ -271,10 +269,11 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
                 {"Ticker": str(r["Ticker"]), "Region": str(r["Region"]), "cause": "UNKNOWN", "confidence_0_1": 0.0, "evidence_headlines": []}
                 for _, r in worst.iterrows()
             ],
-            "global_notes": "OpenAI not available or OPENAI_API_KEY missing. UNKNOWN-only diagnostics.",
+            "global_notes": "OpenAI not available or OPENAI_API_KEY missing.",
+            "news_coverage": coverage,
         }
         _write_overrides(overrides)
-        md_path = _build_postmortem_md(worst, overrides, week_end)
+        md_path = _build_postmortem_md(worst, overrides, week_end, coverage)
         return {"status": "SKIPPED_NO_OPENAI", "md_path": str(md_path)}
 
     worst_payload = worst[[
@@ -284,8 +283,8 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
 
     system = (
         "You are StockD Mentor. Diagnose forecast errors using ONLY the provided headlines and numeric data. "
-        "If evidence is insufficient, output cause UNKNOWN. "
-        "Return STRICT JSON object only (no markdown, no commentary)."
+        "If a ticker has 0 relevant headlines (coverage=0), set cause=UNKNOWN and confidence_0_1=0.0. "
+        "Return STRICT JSON object only (no markdown)."
     )
 
     user_payload = {
@@ -297,9 +296,11 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
         "rules": {
             "use_only_provided_headlines": True,
             "do_not_invent_events": True,
+            "if_no_headlines_then_unknown": True,
             "overrides_must_be_conservative": True,
             "override_limits": {"clip_pct_range": [1.0, 10.0], "multiplier_cap_range": [0.25, 2.50]},
         },
+        "news_coverage": coverage,
         "worst_cases": _to_json_safe(worst_payload),
         "headlines": _to_json_safe(head_payload),
         "output_schema": {
@@ -308,7 +309,7 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
                     "Ticker": "X",
                     "Region": "RO",
                     "cause": "UNKNOWN",
-                    "confidence_0_1": 0.3,
+                    "confidence_0_1": 0.0,
                     "evidence_headlines": ["..."],
                     "safe_overrides": {"clip_pct": 5.0, "multiplier_cap": 1.2},
                     "what_to_learn_next_time": ["..."]
@@ -327,24 +328,43 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
 
     if not parsed or "diagnostics" not in parsed:
         hard_system = (
-            "Return ONLY a valid JSON object. No markdown. No extra keys outside the schema. "
-            "If unsure, set cause to UNKNOWN and confidence_0_1 to 0.0."
+            "Return ONLY a valid JSON object. No markdown. No extra keys. "
+            "If unsure, set cause=UNKNOWN and confidence_0_1=0.0."
         )
         content2 = _call_mentor_llm(client, model_name, hard_system, user_payload)
         _raw_path(week_end).write_text(((content1 or "") + "\n\n--- RETRY ---\n\n" + (content2 or "")), encoding="utf-8")
         parsed = _extract_json_object(content2 or "")
 
     if not parsed or "diagnostics" not in parsed:
-        overrides = {"status": "LLM_INVALID", "items": [], "global_notes": ((content1 or "")[:800])}
+        overrides = {"status": "LLM_INVALID", "items": [], "global_notes": ((content1 or "")[:800]), "news_coverage": coverage}
         _write_overrides(overrides)
-        md_path = _build_postmortem_md(worst, overrides, week_end)
+        md_path = _build_postmortem_md(worst, overrides, week_end, coverage)
         return {"status": "LLM_INVALID", "md_path": str(md_path)}
 
-    overrides: Dict[str, Any] = {"status": "OK", "items": [], "global_notes": str(parsed.get("global_notes", ""))[:800]}
+    overrides: Dict[str, Any] = {
+        "status": "OK",
+        "items": [],
+        "global_notes": str(parsed.get("global_notes", ""))[:800],
+        "news_coverage": coverage,
+    }
 
     for d in parsed.get("diagnostics", []):
         t = str(d.get("Ticker", "")).strip()
         reg = str(d.get("Region", "")).strip()
+
+        # enforce unknown if no headlines
+        cov = int(coverage.get(f"{t}|{reg}", 0))
+        if cov <= 0:
+            overrides["items"].append({
+                "Ticker": t,
+                "Region": reg,
+                "cause": "UNKNOWN",
+                "confidence_0_1": 0.0,
+                "evidence_headlines": [],
+                "what_to_learn_next_time": ["Increase news coverage signal quality or accept UNKNOWN."]
+            })
+            continue
+
         cause = str(d.get("cause", "UNKNOWN")).strip()
         conf = _clamp(float(d.get("confidence_0_1", 0.2)), 0.0, 1.0)
 
@@ -360,7 +380,7 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
         overrides["items"].append(item)
 
     _write_overrides(overrides)
-    md_path = _build_postmortem_md(worst, overrides, week_end)
+    md_path = _build_postmortem_md(worst, overrides, week_end, coverage)
     return {"status": "OK", "md_path": str(md_path)}
 
 
