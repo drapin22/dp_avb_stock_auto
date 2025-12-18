@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional, List
+from typing import Dict, Any, Tuple, Optional
 
 import pandas as pd
 
@@ -21,13 +21,12 @@ class CalibRegion:
 
 @dataclass
 class MentorSafe:
-    clip_pct: float = 8.0          # default clip
-    multiplier_cap: float = 1.5    # default cap
+    clip_pct: float = 8.0
+    multiplier_cap: float = 1.5
 
 
 def _week_bounds(today: Optional[date] = None) -> Tuple[date, date]:
     d = today or date.today()
-    # week start Monday, target Friday
     ws = d - timedelta(days=d.weekday())
     we = ws + timedelta(days=4)
     return ws, we
@@ -70,17 +69,6 @@ def _load_scores() -> pd.DataFrame:
 
 
 def _load_mentor_safe() -> MentorSafe:
-    """
-    mentor_overrides.json are struct:
-    {
-      "status": "...",
-      "items": [...],
-      "global_notes": "...",
-      ...
-    }
-    În global_notes s-ar putea să fie JSON stringificat.
-    Ne interesează safe_overrides: {clip_pct, multiplier_cap}
-    """
     p = getattr(settings, "MENTOR_OVERRIDES_FILE", settings.DATA_DIR / "mentor_overrides.json")
     raw = _load_json(Path(p))
 
@@ -100,42 +88,35 @@ def _load_mentor_safe() -> MentorSafe:
     return MentorSafe(clip_pct=clip_pct, multiplier_cap=multiplier_cap)
 
 
-def _apply_calibration_and_scoring(
+def _load_vol_scales() -> pd.DataFrame:
+    p = settings.DATA_DIR / "volatility_metrics.csv"
+    if not p.exists():
+        return pd.DataFrame(columns=["Ticker", "Region", "vol_scale"])
+    df = pd.read_csv(p)
+    if not {"Ticker", "Region", "vol_scale"}.issubset(set(df.columns)):
+        return pd.DataFrame(columns=["Ticker", "Region", "vol_scale"])
+    df["vol_scale"] = pd.to_numeric(df["vol_scale"], errors="coerce").fillna(1.0)
+    return df[["Ticker", "Region", "vol_scale"]].drop_duplicates()
+
+
+def _apply_calibration_scoring_vol(
     df: pd.DataFrame,
     calib: Dict[str, CalibRegion],
     scores: pd.DataFrame,
     mentor_safe: MentorSafe,
+    vol_scales: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Input df must have: Ticker, Region, ER_Pct (raw)
-    Output adds:
-      BiasAdj, Shrink, Reliability, AdjERPct
-    Rule:
-      bias_corrected = ER_Pct - bias_pp(region)
-      shrunk = bias_corrected * shrink(region)
-      reliability gate:
-        if reliability < 0.25 => multiply 0.5
-        if reliability < 0.15 => force 0 (neutral)
-      mentor caps:
-        AdjERPct clipped to +/- clip_pct
-        multiplier cap is applied vs raw magnitude: |Adj| <= |raw| * multiplier_cap + 0.25
-    """
     out = df.copy()
     out["ER_Pct"] = pd.to_numeric(out["ER_Pct"], errors="coerce").fillna(0.0)
 
-    # join scores
     if not scores.empty:
-        out = out.merge(
-            scores[["Ticker", "Region", "reliability"]],
-            on=["Ticker", "Region"],
-            how="left",
-        )
-    else:
-        out["reliability"] = pd.NA
+        out = out.merge(scores[["Ticker", "Region", "reliability"]], on=["Ticker", "Region"], how="left")
+    out["reliability"] = pd.to_numeric(out.get("reliability"), errors="coerce").fillna(0.5)
 
-    out["reliability"] = pd.to_numeric(out["reliability"], errors="coerce").fillna(0.5)
+    if not vol_scales.empty:
+        out = out.merge(vol_scales, on=["Ticker", "Region"], how="left")
+    out["vol_scale"] = pd.to_numeric(out.get("vol_scale"), errors="coerce").fillna(1.0)
 
-    # region calibration
     def reg_shrink(r: str) -> float:
         return calib.get(r, CalibRegion()).shrink
 
@@ -148,28 +129,27 @@ def _apply_calibration_and_scoring(
     out["BiasAdj"] = out["ER_Pct"] - out["Bias_pp"]
     out["AdjERPct"] = out["BiasAdj"] * out["Shrink"]
 
-    # reliability gating
     def gate(row) -> float:
         rel = float(row["reliability"])
         v = float(row["AdjERPct"])
-        if rel < 0.15:
+        if rel < 0.12:
             return 0.0
         if rel < 0.25:
-            return v * 0.5
+            return v * 0.45
         return v
 
     out["AdjERPct"] = out.apply(gate, axis=1)
 
-    # mentor safe caps
+    # volatility scaling
+    out["AdjERPct"] = out["AdjERPct"] * out["vol_scale"]
+
     clip = float(mentor_safe.clip_pct)
     cap = float(mentor_safe.multiplier_cap)
 
     def cap_fn(row) -> float:
         raw = float(row["ER_Pct"])
         adj = float(row["AdjERPct"])
-        # clip absolute
         adj = max(-clip, min(clip, adj))
-        # multiplier cap vs raw magnitude (with small floor so raw=0 doesn't kill everything)
         limit = abs(raw) * cap + 0.25
         adj = max(-limit, min(limit, adj))
         return adj
@@ -179,7 +159,6 @@ def _apply_calibration_and_scoring(
 
 
 def _load_universe() -> pd.DataFrame:
-    # holdings files in data/
     dfs = []
     for fname in ["holdings_ro.csv", "holdings_eu.csv", "holdings_us.csv"]:
         p = settings.DATA_DIR / fname
@@ -188,7 +167,6 @@ def _load_universe() -> pd.DataFrame:
             if "Ticker" not in d.columns:
                 continue
             if "Region" not in d.columns:
-                # infer from filename
                 if "ro" in fname:
                     d["Region"] = "RO"
                 elif "eu" in fname:
@@ -202,10 +180,6 @@ def _load_universe() -> pd.DataFrame:
 
 
 def _engine_forecast_stub(universe: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aici presupun că ai deja un engine care produce ER_Pct.
-    Dacă OpenAI pică, nu inventăm: returnăm 0.0 și marcăm status.
-    """
     out = universe.copy()
     out["ER_Pct"] = 0.0
     out["EngineStatus"] = "FALLBACK"
@@ -221,21 +195,18 @@ def run_weekly_forecast() -> None:
         send_telegram_message("Weekly forecast: universe is empty (no holdings).")
         return
 
-    # TODO: replace with your real engine call
     raw = _engine_forecast_stub(universe)
 
     calib = _load_calibration()
     scores = _load_scores()
     mentor_safe = _load_mentor_safe()
+    vol_scales = _load_vol_scales()
 
-    adj = _apply_calibration_and_scoring(raw, calib, scores, mentor_safe)
+    adj = _apply_calibration_scoring_vol(raw, calib, scores, mentor_safe, vol_scales)
 
-    # persist in data/forecasts_stockd.csv
     forecasts_path = settings.DATA_DIR / "forecasts_stockd.csv"
-    _ensure = forecasts_path.parent
-    _ensure.mkdir(parents=True, exist_ok=True)
+    settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # build rows
     today = date.today().isoformat()
     rows = []
     for _, r in adj.iterrows():
@@ -251,6 +222,7 @@ def run_weekly_forecast() -> None:
                 "ER_Pct": float(r["ER_Pct"]),
                 "AdjERPct": float(r["AdjERPct"]),
                 "Reliability": float(r.get("reliability", 0.5)),
+                "VolScale": float(r.get("vol_scale", 1.0)),
                 "Notes": str(r.get("Notes", "")),
             }
         )
@@ -262,26 +234,24 @@ def run_weekly_forecast() -> None:
         df_all = pd.concat([old, df_out], ignore_index=True)
     else:
         df_all = df_out
-
     df_all.to_csv(forecasts_path, index=False)
 
-    # weekly CSV for Telegram
-    weekly_csv = settings.REPORTS_DIR / f"weekly_forecast_{week_start.isoformat()}_{week_end.isoformat()}.csv"
     settings.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    weekly_csv = settings.REPORTS_DIR / f"weekly_forecast_{week_start.isoformat()}_{week_end.isoformat()}.csv"
     df_out.to_csv(weekly_csv, index=False)
 
-    # Telegram message: ALL holdings (not top 10)
     lines = []
     lines.append("StockD weekly forecast")
     lines.append(f"Week: {week_start.isoformat()} → {week_end.isoformat()}")
     lines.append(f"Universe: {len(df_out)} tickers")
     lines.append("")
     lines.append("All signals (AdjERPct):")
-    # sort descending by AdjERPct
+
     srt = df_out.sort_values(["AdjERPct", "ER_Pct"], ascending=[False, False]).reset_index(drop=True)
     for _, r in srt.iterrows():
         lines.append(
-            f"- {r['Ticker']} ({r['Region']}): {r['AdjERPct']:+.2f}% (raw {r['ER_Pct']:+.2f}%, rel {r['Reliability']:.2f})"
+            f"- {r['Ticker']} ({r['Region']}): {r['AdjERPct']:+.2f}% "
+            f"(raw {r['ER_Pct']:+.2f}%, rel {r['Reliability']:.2f}, vol {r['VolScale']:.2f})"
         )
 
     send_telegram_message("\n".join(lines))
