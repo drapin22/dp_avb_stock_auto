@@ -2,6 +2,7 @@ name: Weekly Report (Model vs Real)
 
 on:
   schedule:
+    # Saturday 09:00 UTC
     - cron: "0 9 * * 6"
   workflow_dispatch:
 
@@ -45,6 +46,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          export PYTHONPATH="$PYTHONPATH:$(pwd)"
           python -m stockd.weekly_report
 
       - name: Run learning (eval + scoring + mentor)
@@ -53,13 +55,28 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          export PYTHONPATH="$PYTHONPATH:$(pwd)"
           python -m stockd.learning
 
-      - name: Commit and push artifacts (rebase-safe)
+      - name: Commit and push artifacts (rebase-safe + fallback)
         run: |
+          set -e
+
           git config user.name "StockD Agent"
           git config user.email "stockd@bot.com"
 
+          echo "DEBUG: repo status before add"
+          git status --porcelain || true
+
+          echo "DEBUG: listing possible artifact locations"
+          echo "---- data/ ----"
+          ls -la data || true
+          echo "---- reports/ ----"
+          ls -la reports || true
+          echo "---- stockd/data/ ----"
+          ls -la stockd/data || true
+
+          # Add artifacts with fallback paths
           git add \
             reports/weekly_bvb_model_vs_real_*.xlsx \
             reports/weekly_forecast_*.csv \
@@ -69,8 +86,15 @@ jobs:
             reports/mentor_raw_*.txt \
             data/calibration.json \
             data/scores_stockd.csv \
-            data/mentor_overrides.json || true
+            data/mentor_overrides.json \
+            stockd/data/calibration.json \
+            stockd/data/scores_stockd.csv \
+            stockd/data/mentor_overrides.json || true
 
+          echo "DEBUG: staged changes"
+          git diff --cached --name-only || true
+
+          # No changes? exit cleanly
           if git diff --cached --quiet; then
             echo "No artifact changes to commit."
             exit 0
@@ -78,8 +102,9 @@ jobs:
 
           git commit -m "Weekly report + learning artifacts"
 
-          # integrate any new remote commits safely
+          # Integrate any new remote commits safely
+          git fetch origin main
           git pull --rebase origin main
 
-          # push
+          # Push
           git push origin HEAD:main
