@@ -61,9 +61,12 @@ def _load_scores() -> pd.DataFrame:
     p = getattr(settings, "SCORES_FILE", settings.DATA_DIR / "scores_stockd.csv")
     if Path(p).exists():
         df = pd.read_csv(p)
-        for c in ["reliability", "mae_pp", "bias_pp", "hit_rate"]:
+        for c in ["reliability", "mae_pp", "bias_pp", "hit_rate", "n"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
+        # normalize columns
+        if "Ticker" not in df.columns or "Region" not in df.columns:
+            return pd.DataFrame(columns=["Ticker", "Region", "reliability", "mae_pp", "bias_pp", "hit_rate", "n"])
         return df
     return pd.DataFrame(columns=["Ticker", "Region", "reliability", "mae_pp", "bias_pp", "hit_rate", "n"])
 
@@ -109,13 +112,25 @@ def _apply_calibration_scoring_vol(
     out = df.copy()
     out["ER_Pct"] = pd.to_numeric(out["ER_Pct"], errors="coerce").fillna(0.0)
 
-    if not scores.empty:
+    # merge reliability (optional)
+    if not scores.empty and {"Ticker", "Region", "reliability"}.issubset(set(scores.columns)):
         out = out.merge(scores[["Ticker", "Region", "reliability"]], on=["Ticker", "Region"], how="left")
-    out["reliability"] = pd.to_numeric(out.get("reliability"), errors="coerce").fillna(0.5)
 
-    if not vol_scales.empty:
+    # FIX: reliability must always be a Series column
+    if "reliability" not in out.columns:
+        out["reliability"] = 0.5
+    else:
+        out["reliability"] = pd.to_numeric(out["reliability"], errors="coerce").fillna(0.5)
+
+    # merge volatility scale (optional)
+    if not vol_scales.empty and {"Ticker", "Region", "vol_scale"}.issubset(set(vol_scales.columns)):
         out = out.merge(vol_scales, on=["Ticker", "Region"], how="left")
-    out["vol_scale"] = pd.to_numeric(out.get("vol_scale"), errors="coerce").fillna(1.0)
+
+    # FIX: vol_scale must always be a Series column
+    if "vol_scale" not in out.columns:
+        out["vol_scale"] = 1.0
+    else:
+        out["vol_scale"] = pd.to_numeric(out["vol_scale"], errors="coerce").fillna(1.0)
 
     def reg_shrink(r: str) -> float:
         return calib.get(r, CalibRegion()).shrink
@@ -221,8 +236,8 @@ def run_weekly_forecast() -> None:
                 "HorizonDays": 5,
                 "ER_Pct": float(r["ER_Pct"]),
                 "AdjERPct": float(r["AdjERPct"]),
-                "Reliability": float(r.get("reliability", 0.5)),
-                "VolScale": float(r.get("vol_scale", 1.0)),
+                "Reliability": float(r["reliability"]),
+                "VolScale": float(r["vol_scale"]),
                 "Notes": str(r.get("Notes", "")),
             }
         )
@@ -255,7 +270,10 @@ def run_weekly_forecast() -> None:
         )
 
     send_telegram_message("\n".join(lines))
-    send_telegram_document(str(weekly_csv), caption=f"Full forecast list: {week_start.isoformat()} → {week_end.isoformat()}")
+    send_telegram_document(
+        str(weekly_csv),
+        caption=f"Full forecast list: {week_start.isoformat()} → {week_end.isoformat()}",
+    )
 
 
 if __name__ == "__main__":
