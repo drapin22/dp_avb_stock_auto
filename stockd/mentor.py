@@ -2,265 +2,157 @@
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass
+import os
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, Any, List, Optional
 
 import pandas as pd
+from openai import OpenAI
 
 from stockd import settings
+from stockd.ticker_aliases import load_aliases, save_aliases, auto_enrich_aliases, build_query
 
 
-@dataclass
-class MentorResult:
-    status: str
-    error: str
-    md_path: Optional[str] = None
-    overrides_path: Optional[str] = None
-
-
-def _ensure_parent(p: Path) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-
-def _write_json(path: Path, payload: Dict[str, Any]) -> None:
-    _ensure_parent(path)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _write_text(path: Path, text: str) -> None:
-    _ensure_parent(path)
-    path.write_text(text, encoding="utf-8")
-
-
-def _safe_json_from_text(text: str) -> Optional[dict]:
-    if not text:
-        return None
-    # extract first JSON object in text
-    m = re.search(r"\{.*\}", text, flags=re.S)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except Exception:
-        return None
-
-
-def _call_openai_json(prompt: str) -> tuple[Optional[dict], str]:
+def _json_safe(obj):
     """
-    Returns (json_obj, error_str).
-    Works across OpenAI library differences by using the simplest call pattern possible.
+    Ensures any pandas Timestamp is serializable.
     """
-    api_key = getattr(settings, "OPENAI_API_KEY", "") or ""
-    if not api_key:
-        return None, "OPENAI_API_KEY missing"
-
-    model = getattr(settings, "STOCKD_COACH_MODEL_NAME", None) or getattr(settings, "STOCKD_MODEL_NAME", "gpt-4.1-mini")
-
-    try:
-        from openai import OpenAI  # type: ignore
-        client = OpenAI(api_key=api_key)
-
-        # Use Responses API without response_format (you hit issues with that earlier).
-        resp = client.responses.create(
-            model=model,
-            input=prompt,
-        )
-
-        # Best-effort to get text
-        text = ""
-        try:
-            text = getattr(resp, "output_text", "") or ""
-        except Exception:
-            text = ""
-        if not text:
-            # fallback parse
-            try:
-                text = str(resp)
-            except Exception:
-                text = ""
-
-        obj = _safe_json_from_text(text)
-        if obj is None:
-            return None, "LLM returned non-JSON"
-        return obj, ""
-
-    except Exception as e:
-        return None, f"{type(e).__name__}: {str(e)[:200]}"
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    if isinstance(obj, (date,)):
+        return obj.isoformat()
+    return str(obj)
 
 
-def _fetch_headlines(ticker: str, region: str, max_items: int = 5) -> List[str]:
-    """
-    Optional integration. If you have stockd/news_utils.py with a function, we use it.
-    Otherwise we return empty list. This avoids AttributeError crashes.
-    """
-    try:
-        from stockd.news_utils import fetch_headlines_for_ticker  # type: ignore
-        out = fetch_headlines_for_ticker(ticker=ticker, region=region, limit=max_items)
-        if isinstance(out, list):
-            return [str(x) for x in out][:max_items]
-        return []
-    except Exception:
-        return []
+def _client() -> OpenAI:
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-def _build_prompt(eval_df: pd.DataFrame, week_end: date) -> str:
-    """
-    Mentor prompt: ask for structured JSON diagnostics + safe overrides.
-    """
-    df = eval_df.copy()
-
-    # Select worst cases for postmortem
-    for c in ["AbsError_Pct", "Error_Pct", "Model_ER_Pct", "Realized_Pct"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    if "AbsError_Pct" not in df.columns and "Error_Pct" in df.columns:
-        df["AbsError_Pct"] = df["Error_Pct"].abs()
-
-    # worst 8 rows
-    if "AbsError_Pct" in df.columns:
-        df = df.sort_values("AbsError_Pct", ascending=False).head(8)
-
-    cases = []
-    for _, r in df.iterrows():
-        ticker = str(r.get("Ticker", "")).strip()
-        region = str(r.get("Region", "")).strip()
-        if not ticker or not region:
-            continue
-        headlines = _fetch_headlines(ticker, region, max_items=5)
-        cases.append({
-            "Ticker": ticker,
-            "Region": region,
-            "Model_ER_Pct": float(r.get("Model_ER_Pct", 0.0)) if pd.notna(r.get("Model_ER_Pct", 0.0)) else 0.0,
-            "Realized_Pct": float(r.get("Realized_Pct", 0.0)) if pd.notna(r.get("Realized_Pct", 0.0)) else 0.0,
-            "Error_Pct": float(r.get("Error_Pct", 0.0)) if pd.notna(r.get("Error_Pct", 0.0)) else 0.0,
-            "Headlines": headlines,
-        })
-
-    schema_desc = """
-Return STRICT JSON with keys:
-{
-  "diagnostics": [
-    {
-      "Ticker": "string",
-      "Region": "RO|EU|US",
-      "cause": "EARNINGS|MACRO|POLICY_REGULATION|SECTOR|IDIOSYNCRATIC|LIQUIDITY|NEWS_SENTIMENT|OTHER",
-      "confidence_0_1": 0.0-1.0,
-      "evidence_headlines": ["string", ...],
-      "what_to_learn_next_time": ["string", ...],
-      "safe_overrides": {
-        "clip_pct": number,           // max abs forecast to allow next time for this ticker
-        "multiplier_cap": number      // cap on scaling factors
-      }
-    }
-  ],
-  "global_notes": "short string"
-}
-"""
-
-    return (
-        f"You are StockD Mentor. Week end: {week_end.isoformat()}.\n"
-        "We evaluate forecast errors and want to learn and improve.\n\n"
-        "CASES (worst errors):\n"
-        f"{json.dumps(cases, ensure_ascii=False)}\n\n"
-        "TASK:\n"
-        "1) Diagnose likely causes for each case using provided headlines (if any) and market common sense.\n"
-        "2) Propose SAFE overrides (clip_pct, multiplier_cap) that reduce future blowups.\n"
-        "3) Keep it conservative. If evidence is weak, say OTHER with low confidence.\n\n"
-        f"{schema_desc}"
-    )
-
-
-def run_mentor(eval_df: pd.DataFrame, week_end: date) -> Dict[str, Any]:
+def run_mentor(
+    eval_df: pd.DataFrame,
+    week_end: str,
+    max_items: int = 12,
+) -> Dict[str, Any]:
     """
     Produces:
-    - data/mentor_overrides.json
-    - reports/mentor_postmortem_<week_end>.md
-    Always returns a dict, never raises (avoid pipeline break).
+      data/mentor_overrides.json
+      reports/mentor_postmortem_<week_end>.md
+    Does not change forecasts directly; it writes safe rules and diagnostics.
     """
-    overrides_path = Path(getattr(settings, "MENTOR_OVERRIDES_FILE", settings.DATA_DIR / "mentor_overrides.json"))
-    md_path = settings.REPORTS_DIR / f"mentor_postmortem_{week_end.isoformat()}.md"
+    out_overrides = settings.DATA_DIR / "mentor_overrides.json"
+    out_md = settings.REPORTS_DIR / f"mentor_postmortem_{week_end}.md"
 
-    # Default fallback payload
-    fallback = {
-        "status": "LLM_INVALID",
-        "items": [],
-        "global_notes": "",
+    settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    settings.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Basic validation
+    needed = {"Ticker", "Region", "ER_Pct", "RealReturnPct", "ErrorPct"}
+    if not needed.issubset(set(eval_df.columns)):
+        payload = {"status": "INPUT_INVALID", "items": [], "global_notes": ""}
+        out_overrides.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        out_md.write_text("Mentor: INPUT_INVALID\n", encoding="utf-8")
+        return payload
+
+    df = eval_df.copy()
+    df["abs_error"] = df["ErrorPct"].abs()
+    worst = df.sort_values("abs_error", ascending=False).head(max_items).reset_index(drop=True)
+
+    # build / enrich aliases for ambiguous tickers automatically
+    aliases = load_aliases()
+    for _, r in worst.iterrows():
+        aliases = auto_enrich_aliases(str(r["Ticker"]), str(r["Region"]), aliases)
+    save_aliases(aliases)
+
+    items: List[Dict[str, Any]] = []
+    for _, r in worst.iterrows():
+        ticker = str(r["Ticker"])
+        region = str(r["Region"])
+        q = build_query(ticker, region, aliases)
+        items.append(
+            {
+                "Ticker": ticker,
+                "Region": region,
+                "ER_Pct": float(r["ER_Pct"]),
+                "RealReturnPct": float(r["RealReturnPct"]),
+                "ErrorPct": float(r["ErrorPct"]),
+                "NewsQuery": q,
+            }
+        )
+
+    system = (
+        "You are a strict trading model mentor. "
+        "Your job is to diagnose why forecasts were wrong and propose ONLY safe, actionable adjustments. "
+        "Do not hallucinate headlines. If you cannot justify, mark as unknown."
+    )
+
+    user = {
+        "week_end": week_end,
+        "worst_errors": items,
+        "required_output": {
+            "safe_overrides": {"clip_pct": "number", "multiplier_cap": "number"},
+            "diagnostics": [
+                {
+                    "Ticker": "string",
+                    "Region": "string",
+                    "cause": "one of: EARNINGS, MACRO, POLICY_REGULATION, COMPANY_NEWS, SENTIMENT, LIQUIDITY, UNKNOWN",
+                    "confidence_0_1": "number",
+                    "what_to_learn_next_time": ["string", "string"],
+                    "query_fix": "optional improved news query for this ticker",
+                }
+            ],
+        },
     }
 
+    status = "OK"
+    global_notes_obj: Dict[str, Any] = {}
+    raw_text = ""
+
     try:
-        if eval_df is None or eval_df.empty:
-            _write_json(overrides_path, fallback)
-            _write_text(md_path, "# Mentor postmortem\n\nNo eval rows.\n")
-            return {"status": "LLM_INVALID", "error": "No eval rows", "md_path": str(md_path), "overrides_path": str(overrides_path)}
-
-        prompt = _build_prompt(eval_df, week_end)
-        obj, err = _call_openai_json(prompt)
-
-        if obj is None:
-            _write_json(overrides_path, fallback)
-            _write_text(md_path, f"# Mentor postmortem\n\nLLM invalid.\n\nError: {err}\n")
-            return {"status": "LLM_INVALID", "error": err, "md_path": str(md_path), "overrides_path": str(overrides_path)}
-
-        # Normalize expected keys
-        diagnostics = obj.get("diagnostics", [])
-        if not isinstance(diagnostics, list):
-            diagnostics = []
-
-        global_notes = obj.get("global_notes", "")
-        if not isinstance(global_notes, str):
-            global_notes = ""
-
-        payload = {
-            "status": "OK",
-            "items": diagnostics,
-            "global_notes": global_notes,
+        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+        c = _client()
+        resp = c.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user, default=_json_safe, ensure_ascii=False)},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        raw_text = resp.choices[0].message.content or ""
+        global_notes_obj = json.loads(raw_text)
+    except Exception as e:
+        status = "LLM_INVALID"
+        global_notes_obj = {
+            "safe_overrides": {"clip_pct": 6.0, "multiplier_cap": 1.3},
+            "diagnostics": [],
+            "error": str(e),
         }
 
-        _write_json(overrides_path, payload)
+    payload = {
+        "status": status,
+        "items": items,
+        "global_notes": json.dumps(global_notes_obj, ensure_ascii=False),
+    }
 
-        # Markdown report
-        lines = []
-        lines.append("# Mentor postmortem")
-        lines.append("")
-        lines.append(f"Week end: {week_end.isoformat()}")
-        lines.append("")
-        if global_notes:
-            lines.append("## Global notes")
-            lines.append(global_notes)
-            lines.append("")
-        lines.append("## Diagnostics")
-        if not diagnostics:
-            lines.append("No diagnostics.")
-        else:
-            for d in diagnostics:
-                t = d.get("Ticker", "")
-                r = d.get("Region", "")
-                cause = d.get("cause", "")
-                conf = d.get("confidence_0_1", "")
-                lines.append(f"- **{t} ({r})** cause={cause}, conf={conf}")
-                ev = d.get("evidence_headlines", [])
-                if isinstance(ev, list) and ev:
-                    for h in ev[:5]:
-                        lines.append(f"  - {h}")
-                learn = d.get("what_to_learn_next_time", [])
-                if isinstance(learn, list) and learn:
-                    lines.append("  - Learn next time:")
-                    for x in learn[:5]:
-                        lines.append(f"    - {x}")
-                so = d.get("safe_overrides", {})
-                if isinstance(so, dict) and so:
-                    lines.append(f"  - Overrides: clip_pct={so.get('clip_pct')}, multiplier_cap={so.get('multiplier_cap')}")
-        lines.append("")
+    out_overrides.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        _write_text(md_path, "\n".join(lines))
-        return {"status": "OK", "error": "", "md_path": str(md_path), "overrides_path": str(overrides_path)}
+    # Markdown postmortem for humans
+    md_lines = []
+    md_lines.append(f"# StockD mentor postmortem\n")
+    md_lines.append(f"Week end: {week_end}\n")
+    md_lines.append(f"Status: {status}\n\n")
+    md_lines.append("## Worst errors input\n")
+    for it in items:
+        md_lines.append(
+            f"- {it['Ticker']} {it['Region']} raw={it['ER_Pct']:+.2f}% real={it['RealReturnPct']:+.2f}% err={it['ErrorPct']:+.2f}%"
+        )
+    md_lines.append("\n## Mentor output\n")
+    md_lines.append("```json")
+    md_lines.append(json.dumps(global_notes_obj, ensure_ascii=False, indent=2))
+    md_lines.append("```")
 
-    except Exception as e:
-        err = f"{type(e).__name__}: {str(e)[:200]}"
-        _write_json(overrides_path, fallback)
-        _write_text(md_path, f"# Mentor postmortem\n\nMentor crashed.\n\nError: {err}\n")
-        return {"status": "LLM_INVALID", "error": err, "md_path": str(md_path), "overrides_path": str(overrides_path)}
+    out_md.write_text("\n".join(md_lines), encoding="utf-8")
+
+    return payload
