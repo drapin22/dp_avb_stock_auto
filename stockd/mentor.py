@@ -29,24 +29,59 @@ def _raw_path(week_end: date) -> Path:
 
 
 def _extract_json_object(text: str) -> Optional[dict]:
+    """
+    Acceptă:
+      - JSON dict direct
+      - JSON dict înconjurat de markdown fences
+      - JSON “dublu-encodat” (string care conține JSON cu escape-uri)
+      - JSON cu text înainte/după (extrage primul {...} complet)
+    """
     if not text:
         return None
 
     t = text.strip()
 
-    # curăță fence-uri markdown
+    # Curăță fences markdown
     if t.startswith("```"):
         t = t.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
 
-    # încercare directă
+    def _loads_once(s: str) -> Any:
+        return json.loads(s)
+
+    # 1) Încercare directă
     try:
-        obj = json.loads(t)
+        obj = _loads_once(t)
         if isinstance(obj, dict):
             return obj
+
+        # 2) JSON dublu-encodat: obj e string care conține JSON
+        if isinstance(obj, str):
+            s2 = obj.strip()
+            try:
+                obj2 = _loads_once(s2)
+                if isinstance(obj2, dict):
+                    return obj2
+            except Exception:
+                # dacă nu merge, încercăm extractor pe string
+                pass
+
+            # încercare cu substring { ... } în interiorul stringului
+            a2 = s2.find("{")
+            b2 = s2.rfind("}")
+            if a2 != -1 and b2 != -1 and b2 > a2:
+                chunk2 = s2[a2:b2 + 1]
+                try:
+                    obj2 = _loads_once(chunk2)
+                    if isinstance(obj2, dict):
+                        return obj2
+                except Exception:
+                    return None
+
+        return None
     except Exception:
         pass
 
-    # fallback: primul { ... } ultimul }
+    # 3) Fallback: extrage primul { ... } complet din text
     a = t.find("{")
     b = t.rfind("}")
     if a != -1 and b != -1 and b > a:
@@ -55,6 +90,14 @@ def _extract_json_object(text: str) -> Optional[dict]:
             obj = json.loads(chunk)
             if isinstance(obj, dict):
                 return obj
+
+            if isinstance(obj, str):
+                try:
+                    obj2 = json.loads(obj)
+                    if isinstance(obj2, dict):
+                        return obj2
+                except Exception:
+                    return None
         except Exception:
             return None
 
@@ -151,13 +194,9 @@ def _build_postmortem_md(worst: pd.DataFrame, overrides: dict, week_end: date) -
 
 
 def _call_mentor_llm(client: OpenAI, model_name: str, system: str, user_payload: dict) -> str:
-    """
-    Încearcă JSON-mode dacă e suportat. Dacă nu, cade pe call normal.
-    Returnează content (string) sau "".
-    """
     user_text = json.dumps(_to_json_safe(user_payload), ensure_ascii=False)
 
-    # încercare cu response_format dacă SDK-ul/endpoint-ul suportă
+    # încercare cu response_format dacă SDK suportă
     try:
         resp = client.chat.completions.create(
             model=model_name,
@@ -171,10 +210,8 @@ def _call_mentor_llm(client: OpenAI, model_name: str, system: str, user_payload:
         )
         return resp.choices[0].message.content if resp.choices else ""
     except TypeError:
-        # SDK vechi: fără response_format
         pass
     except Exception:
-        # altă eroare: lăsăm fallback să încerce fără JSON mode
         pass
 
     resp = client.chat.completions.create(
@@ -284,12 +321,10 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
     model_name = getattr(settings, "COACH_MODEL_NAME", None) or settings.MODEL_NAME
     client = OpenAI()
 
-    # try 1
     content1 = _call_mentor_llm(client, model_name, system, user_payload)
     _raw_path(week_end).write_text((content1 or "") + "\n", encoding="utf-8")
     parsed = _extract_json_object(content1 or "")
 
-    # retry if invalid
     if not parsed or "diagnostics" not in parsed:
         hard_system = (
             "Return ONLY a valid JSON object. No markdown. No extra keys outside the schema. "
@@ -300,7 +335,7 @@ def run_mentor(eval_df: pd.DataFrame, week_end: date, top_n: int = 8, headlines_
         parsed = _extract_json_object(content2 or "")
 
     if not parsed or "diagnostics" not in parsed:
-        overrides = {"status": "LLM_INVALID", "items": [], "global_notes": (content1 or "")[:800]}
+        overrides = {"status": "LLM_INVALID", "items": [], "global_notes": ((content1 or "")[:800])}
         _write_overrides(overrides)
         md_path = _build_postmortem_md(worst, overrides, week_end)
         return {"status": "LLM_INVALID", "md_path": str(md_path)}
