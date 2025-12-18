@@ -1,69 +1,148 @@
 # stockd/learning.py
 from __future__ import annotations
 
-from datetime import date, timedelta
+import json
+from datetime import date
+from typing import Dict, Any
+
 import pandas as pd
 
 from stockd import settings
-from stockd.evaluation import evaluate_weekly, summarize
-from stockd.scoring import compute_scores, save_scores
-from stockd.calibration import build_region_calibration, save_calibration
+from stockd.telegram_utils import (
+    send_telegram_message,
+    send_telegram_document,
+)
+from stockd.evaluation import (
+    load_prices_history,
+    load_forecasts,
+    dedup_forecasts,
+    evaluate_weekly,
+    summarize_eval,
+    compute_ticker_scores,
+)
 from stockd.mentor import run_mentor
-from stockd.telegram_utils import send_telegram_message, send_telegram_document
 
 
-def _last_completed_week_end(run_date: date) -> date:
-    # ultima vineri înainte de run_date (workflow rulează sâmbăta)
-    offset = (run_date.weekday() - 4) % 7
-    return run_date - timedelta(days=offset)
+def _json_dump(path, obj: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _today_iso() -> str:
+    return date.today().isoformat()
+
+
+def _compute_region_calibration(summary_df: pd.DataFrame) -> Dict[str, Any]:
+    # summary_df: columns like Region, n, MAE_pp, bias_pp (în funcție de cum ai implementat)
+    # Facem reguli simple, robuste:
+    # region_bias = bias_pp
+    # region_shrink = clamp( 1 / (1 + MAE_pp/2) , 0.25, 1.0 )
+    out: Dict[str, Any] = {"regions": {}}
+
+    if summary_df is None or summary_df.empty:
+        return out
+
+    df = summary_df.copy()
+    df.columns = [str(c) for c in df.columns]
+
+    # acceptăm mai multe naming-uri posibile
+    region_col = "Region" if "Region" in df.columns else None
+    if region_col is None:
+        return out
+
+    def pick(col_candidates, default=0.0):
+        for c in col_candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    n_col = pick(["n", "N", "count"])
+    mae_col = pick(["MAE_pp", "MAE", "mae_pp"])
+    bias_col = pick(["bias_pp", "Bias_pp", "bias"])
+
+    for _, r in df.iterrows():
+        region = str(r.get(region_col, "")).strip()
+        if not region:
+            continue
+
+        n = int(r.get(n_col, 0)) if n_col else 0
+        mae = float(r.get(mae_col, 0.0)) if mae_col else 0.0
+        bias = float(r.get(bias_col, 0.0)) if bias_col else 0.0
+
+        # shrink: mai mare MAE, mai mult shrink
+        shrink = 1.0 / (1.0 + (mae / 2.0 if mae > 0 else 0.0))
+        shrink = max(0.25, min(1.0, shrink))
+
+        out["regions"][region] = {
+            "n": n,
+            "mae_pp": round(mae, 4),
+            "bias_pp": round(bias, 4),
+            "shrink": round(shrink, 4),
+        }
+
+    return out
 
 
 def run_learning() -> None:
-    eval_df = evaluate_weekly()
-    if eval_df.empty:
-        send_telegram_message("StockD learning: no completed weeks available for evaluation.")
-        return
+    prices = load_prices_history(settings.PRICES_FILE)
+    forecasts = load_forecasts(settings.FORECASTS_FILE)
+    forecasts = dedup_forecasts(forecasts)
 
-    summary_df = summarize(eval_df)
+    eval_df, info = evaluate_weekly(prices, forecasts)
+    summary_df = summarize_eval(eval_df)
+    scores_df = compute_ticker_scores(eval_df)
 
-    # salvează (overwrite) fișierele de referință
-    eval_df.to_csv(settings.MODEL_EVAL_DETAILED, index=False)
-    summary_df.to_csv(settings.MODEL_EVAL_SUMMARY, index=False)
+    # Persist artifacts
+    settings.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    eval_path = settings.REPORTS_DIR / "model_eval_detailed.csv"
+    sum_path = settings.REPORTS_DIR / "model_eval_summary.csv"
+    scores_path = settings.SCORES_FILE
 
-    # scoring
-    scores_df = compute_scores(eval_df)
-    save_scores(scores_df)
+    eval_df.to_csv(eval_path, index=False)
+    summary_df.to_csv(sum_path, index=False)
+    scores_df.to_csv(scores_path, index=False)
 
-    # calibrare deterministă
-    calib = build_region_calibration(eval_df)
-    save_calibration(calib)
+    # Calibration.json written in repo/data
+    calibration = {
+        "generated_at": _today_iso(),
+        "region_calibration": _compute_region_calibration(summary_df),
+    }
+    _json_dump(settings.CALIBRATION_FILE, calibration)
 
-    # mentor pe ultima săptămână completă
-    week_end = _last_completed_week_end(date.today())
-    last_week = eval_df[eval_df["TargetDate"].dt.date == week_end].copy()
-    mentor_info = run_mentor(last_week, week_end=week_end)
+    # Mentor
+    week_end = info["week_end"]
+    mentor_info = run_mentor(eval_df, week_end=week_end)
 
-    # Telegram (scurt + atașamente)
-    msg_lines = []
-    msg_lines.append("StockD learning update")
-    msg_lines.append(f"Eval rows: {len(eval_df)}")
-    if not summary_df.empty:
-        recent = summary_df.sort_values("WeekStart").groupby("Region").tail(1)
-        for _, r in recent.iterrows():
-            msg_lines.append(
-                f"{r['Region']}: n={int(r['n'])}, hit={float(r['hit_rate']):.2f}, "
-                f"MAE={float(r['mean_abs_error']):.2f}pp, bias={float(r['mean_error']):+.2f}pp"
-            )
-    msg_lines.append(f"Mentor: {mentor_info.get('status')}")
+    # Telegram notify
+    lines = []
+    lines.append("StockD learning update")
+    lines.append(f"Eval rows: {len(eval_df)}")
+    # tipic: summary_df are Region, hit, MAE, bias
+    # păstrăm format tolerant
+    if summary_df is not None and not summary_df.empty:
+        for _, r in summary_df.iterrows():
+            reg = str(r.get("Region", ""))
+            n = r.get("n", r.get("N", ""))
+            hit = r.get("hit", r.get("Hit", ""))
+            mae = r.get("MAE_pp", r.get("MAE", ""))
+            bias = r.get("bias_pp", r.get("bias", ""))
+            lines.append(f"{reg}: n={n}, hit={hit}, MAE={mae}pp, bias={bias}pp")
+    lines.append(f"Mentor: {mentor_info.get('status')}")
 
-    send_telegram_message("\n".join(msg_lines))
-    send_telegram_document(str(settings.MODEL_EVAL_SUMMARY), caption="Model eval summary")
-    send_telegram_document(str(settings.SCORES_FILE), caption="Ticker reliability scores")
+    send_telegram_message("\n".join(lines))
+
+    # Send artifacts
+    send_telegram_document(str(sum_path), caption="Model eval summary")
+    send_telegram_document(str(scores_path), caption="Ticker reliability scores")
     send_telegram_document(str(settings.CALIBRATION_FILE), caption="Calibration")
-    if settings.MENTOR_OVERRIDES_FILE.exists():
-        send_telegram_document(str(settings.MENTOR_OVERRIDES_FILE), caption="Mentor overrides")
-    if mentor_info.get("md_path"):
-        send_telegram_document(str(mentor_info["md_path"]), caption="Mentor postmortem")
+
+    overrides_path = settings.MENTOR_OVERRIDES_FILE
+    if overrides_path.exists():
+        send_telegram_document(str(overrides_path), caption="Mentor overrides")
+
+    md_path = mentor_info.get("md_path")
+    if md_path:
+        send_telegram_document(md_path, caption="Mentor postmortem")
 
 
 if __name__ == "__main__":
