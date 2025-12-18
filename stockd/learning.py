@@ -12,10 +12,6 @@ from stockd import settings
 from stockd.telegram_utils import send_telegram_message, send_telegram_document
 
 
-# ---------------------------
-# Helpers
-# ---------------------------
-
 def _safe_date(x: Any) -> Optional[date]:
     try:
         if isinstance(x, pd.Timestamp):
@@ -37,15 +33,10 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _dedup_forecasts_local(forecasts: pd.DataFrame) -> pd.DataFrame:
-    """
-    Fallback dacă evaluation.py nu are dedup_forecasts.
-    Păstrează ultima predicție per (WeekStart, TargetDate, Ticker, Region).
-    """
     if forecasts is None or forecasts.empty:
         return forecasts
 
     df = forecasts.copy()
-    # normalize cols
     for c in ["Date", "WeekStart", "TargetDate"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
@@ -58,11 +49,29 @@ def _dedup_forecasts_local(forecasts: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _pick_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    cols = set(df.columns)
+    for c in candidates:
+        if c in cols:
+            return c
+    # try case-insensitive
+    lower = {c.lower(): c for c in df.columns}
+    for c in candidates:
+        if c.lower() in lower:
+            return lower[c.lower()]
+    return None
+
+
+def _format_num(x: Any, decimals: int = 2) -> str:
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return "-"
+        return f"{float(x):.{decimals}f}"
+    except Exception:
+        return "-"
+
+
 def _compute_scores(eval_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Construiește un scor simplu de fiabilitate per (Ticker, Region).
-    Output: data/scores_stockd.csv
-    """
     if eval_df is None or eval_df.empty:
         return pd.DataFrame(columns=["Ticker", "Region", "n", "hit_rate", "mae_pp", "bias_pp", "reliability"])
 
@@ -71,28 +80,33 @@ def _compute_scores(eval_df: pd.DataFrame) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # DirectionHit poate lipsi, îl calculăm dacă avem Model/Real
     if "DirectionHit" not in df.columns and "Model_ER_Pct" in df.columns and "Realized_Pct" in df.columns:
-        df["DirectionHit"] = (df["Model_ER_Pct"].fillna(0).apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0)) ==
-                              df["Realized_Pct"].fillna(0).apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))).astype(int)
+        def sgn(v: float) -> int:
+            if v > 0:
+                return 1
+            if v < 0:
+                return -1
+            return 0
+        df["DirectionHit"] = (df["Model_ER_Pct"].fillna(0).apply(sgn) == df["Realized_Pct"].fillna(0).apply(sgn)).astype(int)
 
     gcols = [c for c in ["Ticker", "Region"] if c in df.columns]
     if len(gcols) < 2:
         return pd.DataFrame(columns=["Ticker", "Region", "n", "hit_rate", "mae_pp", "bias_pp", "reliability"])
 
+    mae_source = "AbsError_Pct" if "AbsError_Pct" in df.columns else "Error_Pct"
+    bias_source = "Error_Pct" if "Error_Pct" in df.columns else mae_source
+
     agg = df.groupby(gcols).agg(
-        n=("AbsError_Pct", "count"),
-        hit_rate=("DirectionHit", "mean") if "DirectionHit" in df.columns else ("AbsError_Pct", "count"),
-        mae_pp=("AbsError_Pct", "mean") if "AbsError_Pct" in df.columns else ("Error_Pct", "mean"),
-        bias_pp=("Error_Pct", "mean") if "Error_Pct" in df.columns else ("AbsError_Pct", "mean"),
+        n=(mae_source, "count"),
+        hit_rate=("DirectionHit", "mean") if "DirectionHit" in df.columns else (mae_source, "count"),
+        mae_pp=(mae_source, "mean"),
+        bias_pp=(bias_source, "mean"),
     ).reset_index()
 
-    # reliability: combinație simplă între hit și mae
-    # mai mare MAE => penalizare mai puternică
     def rel(row):
         hit = float(row.get("hit_rate", 0.0))
         mae = float(row.get("mae_pp", 0.0))
-        shrink = 1.0 / (1.0 + max(0.0, mae) / 2.0)  # 2pp ca “scale” inițial
+        shrink = 1.0 / (1.0 + max(0.0, mae) / 2.0)
         return max(0.0, min(1.0, hit * shrink))
 
     agg["reliability"] = agg.apply(rel, axis=1)
@@ -100,31 +114,16 @@ def _compute_scores(eval_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _compute_region_calibration(summary_df: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Construiește calibrare pe regiune: bias + shrink.
-    Acceptă diverse nume de coloane.
-    """
     out: Dict[str, Any] = {"regions": {}}
-    if summary_df is None or summary_df.empty:
+    if summary_df is None or summary_df.empty or "Region" not in summary_df.columns:
         return out
 
-    df = summary_df.copy()
-    df.columns = [str(c) for c in df.columns]
+    n_col = _pick_col(summary_df, ["n", "N", "count"])
+    hit_col = _pick_col(summary_df, ["hit", "hit_rate", "HitRate", "hit_rate_raw", "hit_rate_calibrated"])
+    mae_col = _pick_col(summary_df, ["MAE_pp", "mae_pp", "MAE", "mae", "MAE_raw", "MAE_calibrated"])
+    bias_col = _pick_col(summary_df, ["bias_pp", "Bias_pp", "bias", "Bias"])
 
-    if "Region" not in df.columns:
-        return out
-
-    def pick(cands):
-        for c in cands:
-            if c in df.columns:
-                return c
-        return None
-
-    n_col = pick(["n", "N", "count"])
-    mae_col = pick(["MAE_pp", "MAE", "mae_pp"])
-    bias_col = pick(["bias_pp", "Bias_pp", "bias"])
-
-    for _, r in df.iterrows():
+    for _, r in summary_df.iterrows():
         reg = str(r.get("Region", "")).strip()
         if not reg:
             continue
@@ -146,88 +145,63 @@ def _compute_region_calibration(summary_df: pd.DataFrame) -> Dict[str, Any]:
     return out
 
 
-# ---------------------------
-# Main
-# ---------------------------
-
 def run_learning() -> None:
-    # Importă ce există în evaluation.py (nume reale din repo)
     from stockd.evaluation import load_prices, load_forecasts, evaluate_weekly
     try:
         from stockd.evaluation import dedup_forecasts  # optional
     except Exception:
-        dedup_forecasts = None  # type: ignore
+        dedup_forecasts = None
 
     try:
         from stockd.evaluation import summarize  # optional
     except Exception:
-        summarize = None  # type: ignore
+        summarize = None
 
-    # Load
     prices = load_prices()
     forecasts = load_forecasts()
 
-    # Dedup
     if dedup_forecasts is not None:
         forecasts = dedup_forecasts(forecasts)
     else:
         forecasts = _dedup_forecasts_local(forecasts)
 
-    # Evaluate
     eval_df = evaluate_weekly(prices, forecasts)
 
-    # Derive week_end
     week_end: date = date.today()
-    if eval_df is not None and not eval_df.empty:
-        if "TargetDate" in eval_df.columns:
-            mx = pd.to_datetime(eval_df["TargetDate"], errors="coerce").max()
-            d = _safe_date(mx)
-            if d:
-                week_end = d
+    if eval_df is not None and not eval_df.empty and "TargetDate" in eval_df.columns:
+        mx = pd.to_datetime(eval_df["TargetDate"], errors="coerce").max()
+        d = _safe_date(mx)
+        if d:
+            week_end = d
 
-    # Summary
     if summarize is not None:
         summary_df = summarize(eval_df)
-        # unele implementări întorc dict; normalizăm
         if isinstance(summary_df, dict):
             summary_df = pd.DataFrame(summary_df)
     else:
-        # fallback minimal: sumar pe regiune
         summary_df = pd.DataFrame()
-        if eval_df is not None and not eval_df.empty and "Region" in eval_df.columns:
-            tmp = eval_df.copy()
-            for c in ["AbsError_Pct", "Error_Pct", "DirectionHit"]:
-                if c in tmp.columns:
-                    tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
-            if "DirectionHit" not in tmp.columns and "Model_ER_Pct" in tmp.columns and "Realized_Pct" in tmp.columns:
-                tmp["DirectionHit"] = (
-                    tmp["Model_ER_Pct"].fillna(0).apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0)) ==
-                    tmp["Realized_Pct"].fillna(0).apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
-                ).astype(int)
 
-            summary_df = tmp.groupby("Region").agg(
-                n=("AbsError_Pct", "count") if "AbsError_Pct" in tmp.columns else ("Error_Pct", "count"),
-                hit=("DirectionHit", "mean") if "DirectionHit" in tmp.columns else ("Error_Pct", "count"),
-                MAE_pp=("AbsError_Pct", "mean") if "AbsError_Pct" in tmp.columns else ("Error_Pct", "mean"),
-                bias_pp=("Error_Pct", "mean") if "Error_Pct" in tmp.columns else ("AbsError_Pct", "mean"),
-            ).reset_index()
+    # De-dup summary by Region if duplicates exist
+    if summary_df is not None and not summary_df.empty and "Region" in summary_df.columns:
+        # keep last row per Region (or mean numeric if multiple)
+        num_cols = [c for c in summary_df.columns if c != "Region" and pd.api.types.is_numeric_dtype(summary_df[c])]
+        if num_cols:
+            summary_df = summary_df.groupby("Region", as_index=False)[num_cols].mean()
+        else:
+            summary_df = summary_df.drop_duplicates(subset=["Region"], keep="last")
 
-    # Scores
     scores_df = _compute_scores(eval_df)
 
-    # Paths
     settings.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     detailed_path = settings.REPORTS_DIR / "model_eval_detailed.csv"
     summary_path = settings.REPORTS_DIR / "model_eval_summary.csv"
     scores_path = getattr(settings, "SCORES_FILE", settings.DATA_DIR / "scores_stockd.csv")
 
-    # Save artifacts
     eval_df.to_csv(detailed_path, index=False)
     summary_df.to_csv(summary_path, index=False)
-    _ensure_parent(scores_path)
+    _ensure_parent(Path(scores_path))
     scores_df.to_csv(scores_path, index=False)
 
-    # Calibration
     calibration_path = getattr(settings, "CALIBRATION_FILE", settings.DATA_DIR / "calibration.json")
     calibration = {
         "generated_at": date.today().isoformat(),
@@ -236,40 +210,50 @@ def run_learning() -> None:
     }
     _write_json(Path(calibration_path), calibration)
 
-    # Mentor (optional)
     mentor_status = "SKIPPED"
+    mentor_err = ""
     mentor_md_path = None
     try:
         from stockd.mentor import run_mentor
         mentor_info = run_mentor(eval_df, week_end=week_end)
         mentor_status = str(mentor_info.get("status", "OK"))
         mentor_md_path = mentor_info.get("md_path")
+        mentor_err = str(mentor_info.get("error", ""))[:200]
     except Exception as e:
-        mentor_status = f"ERROR: {type(e).__name__}"
+        mentor_status = "ERROR"
+        mentor_err = f"{type(e).__name__}: {str(e)[:200]}"
 
-    # Telegram notify
+    # Build message with robust column detection
     msg_lines = []
     msg_lines.append("StockD learning update")
     msg_lines.append(f"Week end: {week_end.isoformat()}")
     msg_lines.append(f"Eval rows: {0 if eval_df is None else len(eval_df)}")
-    msg_lines.append(f"Mentor: {mentor_status}")
+    msg_lines.append(f"Mentor: {mentor_status}" + (f" ({mentor_err})" if mentor_err else ""))
 
-    # Add region summary compact
-    if summary_df is not None and not summary_df.empty:
-        try:
-            for _, r in summary_df.iterrows():
-                reg = str(r.get("Region", ""))
-                n = r.get("n", r.get("N", ""))
-                hit = r.get("hit", r.get("Hit", ""))
-                mae = r.get("MAE_pp", r.get("MAE", ""))
-                bias = r.get("bias_pp", r.get("bias", ""))
-                msg_lines.append(f"{reg}: n={n}, hit={hit}, MAE={mae}pp, bias={bias}pp")
-        except Exception:
-            pass
+    if summary_df is not None and not summary_df.empty and "Region" in summary_df.columns:
+        n_col = _pick_col(summary_df, ["n", "N", "count"])
+        hit_col = _pick_col(summary_df, ["hit", "hit_rate", "HitRate", "hit_rate_raw", "hit_rate_calibrated"])
+        mae_col = _pick_col(summary_df, ["MAE_pp", "mae_pp", "MAE", "mae", "MAE_raw", "MAE_calibrated"])
+        bias_col = _pick_col(summary_df, ["bias_pp", "Bias_pp", "bias", "Bias"])
+
+        for _, r in summary_df.iterrows():
+            reg = str(r.get("Region", "")).strip()
+            if not reg:
+                continue
+            n = r.get(n_col) if n_col else None
+            hit = r.get(hit_col) if hit_col else None
+            mae = r.get(mae_col) if mae_col else None
+            bias = r.get(bias_col) if bias_col else None
+
+            msg_lines.append(
+                f"{reg}: n={n if n is not None else '-'}, "
+                f"hit={_format_num(hit, 2)}, "
+                f"MAE={_format_num(mae, 2)}pp, "
+                f"bias={_format_num(bias, 2)}pp"
+            )
 
     send_telegram_message("\n".join(msg_lines))
 
-    # Send artifacts
     send_telegram_document(str(summary_path), caption="Model eval summary")
     send_telegram_document(str(scores_path), caption="Ticker reliability scores")
     send_telegram_document(str(calibration_path), caption="Calibration")
