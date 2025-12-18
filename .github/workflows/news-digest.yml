@@ -1,0 +1,48 @@
+name: News Digest (Debug)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  news-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run news debug (prints headlines)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          from stockd.news_rss import fetch_headlines_for_ticker
+          tests = [
+              ("PATH","US"),
+              ("BABA","US"),
+              ("LHA.DE","EU"),
+              ("FP","RO"),
+          ]
+          for t,r in tests:
+              df = fetch_headlines_for_ticker(t,r,since_days=14,max_items=10)
+              print("\n=== ", t, r, " ===")
+              if df is None or df.empty:
+                  print("No relevant headlines.")
+              else:
+                  print(df[["PublishedAt","Headline","Query"]].to_string(index=False))
+          PY
