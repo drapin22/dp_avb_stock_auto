@@ -1,268 +1,149 @@
-# stockd/engine.py
 from __future__ import annotations
 
-from datetime import date
 import json
-import time
-from typing import Dict, Any, Optional
+from datetime import date as dt_date, datetime
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
-from openai import OpenAI
 
 from stockd import settings
-
-client = OpenAI()
-
-
-def _compute_ticker_features(prices_history: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFrame:
-    if prices_history.empty or holdings.empty:
-        return pd.DataFrame(columns=[
-            "Ticker", "Region", "last_close",
-            "ret_5d", "ret_20d", "ret_60d",
-            "vol_20d", "max_dd_60d",
-        ])
-
-    ph = prices_history.copy()
-    ph["Date"] = pd.to_datetime(ph["Date"], errors="coerce")
-    ph["Close"] = pd.to_numeric(ph["Close"], errors="coerce")
-    ph = ph.dropna(subset=["Date", "Close"])
-
-    hold = holdings[["Ticker", "Region"]].drop_duplicates().copy()
-    ph = ph.merge(hold, on=["Ticker", "Region"], how="inner")
-    if ph.empty:
-        return pd.DataFrame(columns=[
-            "Ticker", "Region", "last_close",
-            "ret_5d", "ret_20d", "ret_60d",
-            "vol_20d", "max_dd_60d",
-        ])
-
-    cutoff = ph["Date"].max() - pd.Timedelta(days=80)
-    ph = ph[ph["Date"] >= cutoff].sort_values(["Ticker", "Region", "Date"]).copy()
-
-    out = []
-    for (tkr, reg), g in ph.groupby(["Ticker", "Region"], sort=False):
-        g = g.sort_values("Date").copy()
-        closes = g["Close"].astype(float).values
-        if len(closes) < 2:
-            continue
-
-        last_close = float(closes[-1])
-
-        def pct_return(n: int) -> float:
-            if len(closes) < n + 1:
-                return float("nan")
-            return float((closes[-1] / closes[-(n + 1)] - 1.0) * 100.0)
-
-        ret_5d = pct_return(5)
-        ret_20d = pct_return(20)
-        ret_60d = pct_return(60)
-
-        if len(closes) >= 21:
-            daily_ret = pd.Series(closes).pct_change()
-            vol_20d = float(daily_ret.tail(20).std() * (20 ** 0.5) * 100.0)
-        else:
-            vol_20d = float("nan")
-
-        g_tail = g.tail(60).copy()
-        roll_max = g_tail["Close"].cummax()
-        dd = g_tail["Close"] / roll_max - 1.0
-        max_dd_60d = float(dd.min() * 100.0) if not dd.empty else float("nan")
-
-        out.append({
-            "Ticker": str(tkr),
-            "Region": str(reg),
-            "last_close": last_close,
-            "ret_5d": ret_5d,
-            "ret_20d": ret_20d,
-            "ret_60d": ret_60d,
-            "vol_20d": vol_20d,
-            "max_dd_60d": max_dd_60d,
-        })
-
-    return pd.DataFrame(out)
+from stockd.features import compute_ticker_features
+from stockd.macro import get_macro_snapshot
+from stockd.online_model import load_state, predict
+from stockd.mentor import propose_news_deltas
 
 
-def _compute_region_summary(ticker_features: pd.DataFrame) -> pd.DataFrame:
-    if ticker_features.empty:
-        return pd.DataFrame(columns=[
-            "Region", "avg_ret_5d", "avg_ret_20d", "avg_ret_60d",
-            "avg_vol_20d", "avg_max_dd_60d", "risk_regime",
-        ])
-
-    agg = (
-        ticker_features
-        .groupby("Region")[["ret_5d", "ret_20d", "ret_60d", "vol_20d", "max_dd_60d"]]
-        .mean()
-        .reset_index()
-        .rename(columns={
-            "ret_5d": "avg_ret_5d",
-            "ret_20d": "avg_ret_20d",
-            "ret_60d": "avg_ret_60d",
-            "vol_20d": "avg_vol_20d",
-            "max_dd_60d": "avg_max_dd_60d",
-        })
-    )
-
-    regimes = []
-    for _, row in agg.iterrows():
-        m20 = row["avg_ret_20d"]
-        vol = row["avg_vol_20d"]
-        dd = row["avg_max_dd_60d"]
-        if pd.isna(m20):
-            regime = "UNKNOWN"
-        elif m20 > 3 and dd > -10:
-            regime = "RISK_ON"
-        elif m20 < -3 and dd < -15:
-            regime = "RISK_OFF"
-        elif (not pd.isna(vol)) and vol > 8 and dd < -12:
-            regime = "RISK_OFF"
-        else:
-            regime = "NEUTRAL"
-        regimes.append(regime)
-
-    agg["risk_regime"] = regimes
-    return agg
+def _clip(x: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, x)))
 
 
-def _build_prompt(
-    holdings: pd.DataFrame,
-    ticker_features: pd.DataFrame,
-    region_summary: pd.DataFrame,
-    as_of: date,
-    horizon_days: int,
-) -> str:
-    hold_records = holdings[["Ticker", "Region"]].to_dict(orient="records")
-    feat_records = ticker_features.to_dict(orient="records")
-    reg_records = region_summary.to_dict(orient="records")
-
-    prompt = f"""
-Return STRICT JSON only, no prose, no markdown.
-
-Schema:
-{{
-  "forecasts": [
-    {{"Ticker":"...", "Region":"RO|EU|US", "ER_Pct": 0.0}}
-  ]
-}}
-
-Date: {as_of.isoformat()}
-HorizonDays: {horizon_days}
-
-Rules:
-- Conservative magnitudes, typical weekly ER within +/-10.
-- If weak signal, ER close to 0.
-- Use only the provided price-based context.
-
-HOLDINGS:
-{json.dumps(hold_records, indent=2)}
-
-TICKER_FEATURES:
-{json.dumps(feat_records, indent=2)}
-
-REGION_SUMMARY:
-{json.dumps(reg_records, indent=2)}
-""".strip()
-    return prompt
-
-
-def _extract_json_object(text: str) -> Optional[dict]:
+def _risk_regime_shrink(macro: Dict) -> float:
     """
-    Parsing defensiv: încearcă json direct; dacă nu merge, caută primul obiect { ... }.
+    Proxy psihologie/regim:
+    VIX mare + DXY în creștere + SPX negativ => shrink.
     """
-    if not text:
-        return None
-
-    t = text.strip()
     try:
-        return json.loads(t)
-    except Exception:
-        pass
+        vix = macro.get("series", {}).get("VIX", {}).get("last", None)
+        spx = macro.get("series", {}).get("SPX", {}).get("ret_5d_pct", 0.0) or 0.0
+        dxy = macro.get("series", {}).get("DXY", {}).get("ret_5d_pct", 0.0) or 0.0
 
-    first = t.find("{")
-    last = t.rfind("}")
-    if first != -1 and last != -1 and last > first:
-        chunk = t[first:last + 1]
-        try:
-            return json.loads(chunk)
-        except Exception:
-            return None
-    return None
+        if vix is None:
+            return 1.0
+
+        vix = float(vix)
+        if vix >= 25 and spx < 0:
+            return 0.70
+        if vix >= 22 and (spx < 0 or dxy > 0):
+            return 0.80
+        if vix <= 16:
+            return 1.00
+        return 0.90
+    except Exception:
+        return 0.90
+
+
+def _fallback_heuristic(features: pd.DataFrame) -> np.ndarray:
+    """
+    Dacă nu există model_state, produc o predicție numerică simplă:
+    - momentum (20d, 60d)
+    - penalizare vol și drawdown
+    """
+    ret20 = pd.to_numeric(features.get("ret_20d"), errors="coerce").fillna(0.0).values
+    ret60 = pd.to_numeric(features.get("ret_60d"), errors="coerce").fillna(0.0).values
+    vol20 = pd.to_numeric(features.get("vol_20d"), errors="coerce").fillna(0.0).values
+    mdd60 = pd.to_numeric(features.get("max_dd_60d"), errors="coerce").fillna(0.0).values  # negativ
+
+    # scale conservator la săptămână
+    base = 0.10 * ret20 + 0.05 * ret60 - 0.03 * vol20 + 0.02 * mdd60
+    return np.clip(base, -5.0, 5.0)
 
 
 def run_stockd_model(
     holdings: pd.DataFrame,
     prices_history: pd.DataFrame,
-    as_of: date,
+    as_of: dt_date,
     horizon_days: int,
 ) -> pd.DataFrame:
-    """
-    Returnează:
-      Ticker, Region, ER_Pct
-      EngineStatus: OK / FALLBACK_ZERO
-      LastError: motiv scurt la fallback
-    """
-    if holdings.empty:
-        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct", "EngineStatus", "LastError"])
+    if holdings is None or holdings.empty:
+        return pd.DataFrame(columns=["Ticker", "Region", "ER_Pct"])
 
-    holdings = holdings[["Ticker", "Region"]].drop_duplicates().copy()
-    holdings["Ticker"] = holdings["Ticker"].astype(str)
-    holdings["Region"] = holdings["Region"].astype(str)
+    h = holdings.copy()
+    h["Ticker"] = h["Ticker"].astype(str).str.upper().str.strip()
+    h["Region"] = h["Region"].astype(str).str.upper().str.strip()
+    h = h[["Ticker", "Region"]].drop_duplicates()
 
-    ticker_features = _compute_ticker_features(prices_history, holdings)
-    region_summary = _compute_region_summary(ticker_features)
-    prompt = _build_prompt(holdings, ticker_features, region_summary, as_of, horizon_days)
+    # features
+    feat_df, feat_debug = compute_ticker_features(prices_history, h)
+    if feat_df.empty:
+        out = h.copy()
+        out["ER_Pct"] = 0.0
+        return out
 
-    system_msg = (
-        f"You are {settings.MODEL_VERSION_TAG}, a systematic multi-region equity forecaster. "
-        f"Output must be strict JSON matching the provided schema."
-    )
+    # macro snapshot
+    macro = get_macro_snapshot(datetime.combine(as_of, datetime.min.time())) if settings.ENABLE_MACRO else {"as_of": str(as_of), "series": {}, "regions": {}}
+    shrink = _risk_regime_shrink(macro)
 
-    last_err = None
-    for attempt in range(1, 4):
-        try:
-            resp = client.chat.completions.create(
-                model=settings.MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.2,
-                max_tokens=900,
-            )
+    # create model input frame (same columns as training)
+    model_in = feat_df.copy()
 
-            content = resp.choices[0].message.content if resp.choices else ""
-            parsed = _extract_json_object(content)
-            if not parsed or "forecasts" not in parsed:
-                raise ValueError("Model output is not valid JSON or missing 'forecasts'.")
+    def s(name, key):
+        v = macro.get("series", {}).get(name, {}).get(key, None)
+        return float(v) if v is not None else 0.0
 
-            df = pd.DataFrame(parsed.get("forecasts", []))
-            if df.empty:
-                raise ValueError("Empty forecasts from model output.")
+    # map macros
+    model_in["vix_level"] = s("VIX", "last")
+    model_in["dxy_ret_5d"] = s("DXY", "ret_5d_pct")
+    model_in["oil_ret_5d"] = s("OIL", "ret_5d_pct")
+    model_in["gold_ret_5d"] = s("GOLD", "ret_5d_pct")
 
-            for col in ["Ticker", "Region", "ER_Pct"]:
-                if col not in df.columns:
-                    raise ValueError(f"Missing column in forecasts: {col}")
+    # region bench returns
+    us_bench = macro.get("regions", {}).get("US", {}).get("bench_ret_5d_pct", 0.0) or 0.0
+    eu_bench = macro.get("regions", {}).get("EU", {}).get("bench_ret_5d_pct", 0.0) or 0.0
 
-            df["Ticker"] = df["Ticker"].astype(str)
-            df["Region"] = df["Region"].astype(str)
-            df["ER_Pct"] = pd.to_numeric(df["ER_Pct"], errors="coerce").fillna(0.0)
+    model_in["bench_ret_5d"] = 0.0
+    model_in.loc[model_in["Region"] == "US", "bench_ret_5d"] = float(us_bench)
+    model_in.loc[model_in["Region"] == "EU", "bench_ret_5d"] = float(eu_bench)
+    model_in.loc[model_in["Region"] == "RO", "bench_ret_5d"] = pd.to_numeric(model_in["ro_proxy_ret_5d"], errors="coerce").fillna(0.0)
 
-            merged = holdings.merge(df[["Ticker", "Region", "ER_Pct"]], on=["Ticker", "Region"], how="left")
-            merged["ER_Pct"] = merged["ER_Pct"].fillna(0.0)
-            merged["EngineStatus"] = "OK"
-            merged["LastError"] = ""
-            return merged
+    # numeric prediction
+    state = load_state(settings.MODEL_STATE_JSON)
+    if state and state.get("ok"):
+        base_pred = predict(model_in, state)
+    else:
+        base_pred = _fallback_heuristic(model_in)
 
-        except Exception as exc:
-            last_err = f"{type(exc).__name__}: {exc}"
-            sleep_s = 2 ** attempt
-            print(f"[STOCKD] OpenAI call failed (attempt {attempt}/3): {last_err}. Retrying in {sleep_s}s")
-            time.sleep(sleep_s)
+    # apply regime shrink
+    base_pred = np.clip(base_pred * float(shrink), -settings.MAX_ABS_ER_PCT, settings.MAX_ABS_ER_PCT)
 
-    print(f"[STOCKD] ERROR calling OpenAI after retries: {last_err}")
-    fb = holdings.copy()
-    fb["ER_Pct"] = 0.0
-    fb["EngineStatus"] = "FALLBACK_ZERO"
-    fb["LastError"] = last_err or "unknown"
-    return fb
+    # news delta from LLM (batch, capped)
+    deltas = { (r["Ticker"], r["Region"]): 0.0 for _, r in model_in.iterrows() }
+    reasons = { (r["Ticker"], r["Region"]): "" for _, r in model_in.iterrows() }
+
+    if settings.OPENAI_API_KEY and settings.ENABLE_LLM_NEWS_ADJ:
+        items = []
+        for i, r in model_in.iterrows():
+            items.append({"Ticker": r["Ticker"], "Region": r["Region"], "base_er_pct": float(base_pred[i])})
+        out = propose_news_deltas(items, macro_snapshot=macro)
+        if isinstance(out, dict) and out.get("ok") and isinstance(out.get("deltas"), list):
+            for d in out["deltas"]:
+                k = (str(d.get("Ticker","")).upper().strip(), str(d.get("Region","")).upper().strip())
+                delta_pp = float(d.get("delta_pp", 0.0) or 0.0)
+                delta_pp = _clip(delta_pp, -settings.MAX_NEWS_DELTA_PP, settings.MAX_NEWS_DELTA_PP)
+                if bool(d.get("ambiguous", False)):
+                    delta_pp = 0.0
+                if k in deltas:
+                    deltas[k] = delta_pp
+                    reasons[k] = str(d.get("reason",""))[:120]
+
+    # final
+    er = []
+    for i, r in model_in.iterrows():
+        k = (r["Ticker"], r["Region"])
+        final = float(base_pred[i]) + float(deltas.get(k, 0.0))
+        final = _clip(final, -settings.MAX_ABS_ER_PCT, settings.MAX_ABS_ER_PCT)
+        er.append(final)
+
+    out_df = model_in[["Ticker","Region"]].copy()
+    out_df["ER_Pct"] = er
+    return out_df
