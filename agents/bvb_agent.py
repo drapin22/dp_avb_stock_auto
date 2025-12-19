@@ -5,17 +5,11 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-# Unde salvăm istoricul de prețuri
 DATA_PATH = "data/prices_history.csv"
-# Lista de companii românești din portofoliu
 HOLDINGS_RO_PATH = "data/holdings_ro.csv"
 
 
 def load_ro_tickers():
-    """
-    Citește lista de companii românești urmărite din holdings_ro.csv.
-    Dacă fișierul nu există, folosește o listă fallback hard-codată.
-    """
     if not os.path.exists(HOLDINGS_RO_PATH):
         print("[RO] holdings_ro.csv not found, using fallback list.")
         return [
@@ -32,11 +26,6 @@ def load_ro_tickers():
 
 
 def fetch_bvb_prices_for_today() -> pd.DataFrame:
-    """
-    Ia prețurile de închidere (coloana 'Închidere') pentru tickerele din holdings_ro
-    de pe pagina de 'Sumar tranzacționare' BVB (m.bvb.ro).
-    Folosește data curentă implicită a site-ului.
-    """
     today = datetime.utcnow().date()
     date_str = today.strftime("%Y-%m-%d")
 
@@ -46,8 +35,6 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
 
     url = "https://m.bvb.ro/tradingandstatistics/trading/historicaltradinginfo"
-
-    # User-Agent de browser mobil, ca să nu fim blocați ca bot
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -69,6 +56,39 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         print("[RO] No table found on BVB page.")
         return pd.DataFrame(columns=["Date", "Ticker", "Region", "Currency", "Close"])
 
+    headers_text = []
+    header_tr = table.find("tr")
+    if header_tr:
+        ths = header_tr.find_all("th")
+        if ths:
+            headers_text = [th.get_text(strip=True) for th in ths]
+
+    def _idx(name_variants, default_idx: int | None = None) -> int | None:
+        if not headers_text:
+            return default_idx
+        for i, h in enumerate(headers_text):
+            for v in name_variants:
+                if v.lower() in h.lower():
+                    return i
+        return default_idx
+
+    idx_symbol = _idx(["simbol", "symbol"], 0)
+    idx_close = _idx(["închidere", "inchidere", "close"], 8)
+
+    last_close_map = {}
+    if os.path.exists(DATA_PATH):
+        try:
+            hist = pd.read_csv(DATA_PATH)
+            hist = hist[hist.get("Region", "") == "RO"]
+            hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
+            hist["Ticker"] = hist["Ticker"].astype(str).str.upper().str.strip()
+            hist["Close"] = pd.to_numeric(hist.get("Close"), errors="coerce")
+            hist = hist.dropna(subset=["Date", "Ticker", "Close"]).sort_values(["Ticker", "Date"])
+            last = hist.groupby("Ticker", as_index=False).tail(1)
+            last_close_map = {r["Ticker"]: float(r["Close"]) for _, r in last.iterrows()}
+        except Exception:
+            last_close_map = {}
+
     rows = []
     trs = table.find_all("tr")
     print(f"[RO] Found {len(trs)} rows in BVB table.")
@@ -78,29 +98,17 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
         if not tds:
             continue
 
-        symbol = tds[0]
+        if idx_symbol is None or idx_symbol >= len(tds):
+            continue
+        symbol = tds[idx_symbol]
         if symbol not in tickers_ro:
             continue
 
-        # Structura actuală a tabelului (din captura ta):
-        # 0 Simbol
-        # 1 Piața
-        # 2 Nr. tranz.
-        # 3 Volum
-        # 4 Valoare
-        # 5 Desch.
-        # 6 Min.
-        # 7 Max.
-        # 8 Închidere   ← asta ne interesează
-        # 9 Mediu
-        # 10 Pret ref.
-        # 11 Var (%)
-
-        if len(tds) <= 8:
-            print(f"[RO] Not enough columns for {symbol}: {tds}")
+        if idx_close is None or idx_close >= len(tds):
+            print(f"[RO] Close column not found for {symbol}: {tds}")
             continue
 
-        raw_close = tds[8]
+        raw_close = tds[idx_close]
         cleaned = raw_close.replace(".", "").replace(",", ".")
         try:
             close = float(cleaned)
@@ -108,14 +116,19 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
             print(f"[RO] Could not parse close for {symbol}: '{raw_close}'")
             continue
 
+        if close <= 0 or close > 10_000:
+            print(f"[RO] Suspicious close for {symbol}: {close} (raw '{raw_close}')")
+            continue
+
+        prev = last_close_map.get(symbol)
+        if prev and prev > 0:
+            ratio = close / prev
+            if ratio > 2.5 or ratio < 0.4:
+                print(f"[RO] Suspicious jump for {symbol}: prev {prev} -> {close} (ratio {ratio:.2f}); skipping")
+                continue
+
         rows.append(
-            {
-                "Date": date_str,
-                "Ticker": symbol,
-                "Region": "RO",
-                "Currency": "RON",
-                "Close": close,
-            }
+            {"Date": date_str, "Ticker": symbol, "Region": "RO", "Currency": "RON", "Close": close}
         )
 
     if not rows:
@@ -128,19 +141,13 @@ def fetch_bvb_prices_for_today() -> pd.DataFrame:
 
 
 def append_to_csv(df: pd.DataFrame, path: str) -> None:
-    """
-    Adaugă noile prețuri în prices_history.csv, fără să dubleze rânduri
-    pentru aceeași zi / ticker / regiune.
-    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if not os.path.exists(path):
         df.to_csv(path, index=False)
     else:
         old = pd.read_csv(path)
         combined = pd.concat([old, df], ignore_index=True)
-        combined.drop_duplicates(
-            subset=["Date", "Ticker", "Region"], keep="last", inplace=True
-        )
+        combined.drop_duplicates(subset=["Date", "Ticker", "Region"], keep="last", inplace=True)
         combined.to_csv(path, index=False)
 
 
@@ -149,7 +156,6 @@ def main() -> None:
     if df.empty:
         print("[RO] No data fetched from BVB for today.")
         return
-
     append_to_csv(df, DATA_PATH)
     print(f"[RO] Saved RO prices for {df['Date'].iloc[0]} for {len(df)} tickers.")
 
