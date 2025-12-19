@@ -9,78 +9,46 @@ import requests
 from stockd import settings
 
 
-def _has_telegram() -> bool:
+def _has_creds() -> bool:
     return bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID)
 
 
-def _api_url(method: str) -> str:
+def _api(method: str) -> str:
     return f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/{method}"
 
 
-def send_telegram_message(text: str, parse_mode: Optional[str] = None, disable_preview: bool = True) -> bool:
-    if not _has_telegram():
+def send_telegram_message(text: str, parse_mode: Optional[str] = None) -> bool:
+    if not _has_creds():
+        print("[TG] Missing TELEGRAM creds, skipping message.")
         return False
 
-    payload = {
-        "chat_id": settings.TELEGRAM_CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": disable_preview,
-    }
+    payload = {"chat_id": settings.TELEGRAM_CHAT_ID, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
 
-    r = requests.post(_api_url("sendMessage"), json=payload, timeout=30)
-    return r.ok
-
-
-def send_telegram_document(file_path: str | Path, caption: Optional[str] = None) -> bool:
-    if not _has_telegram():
+    try:
+        r = requests.post(_api("sendMessage"), json=payload, timeout=30)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[TG] sendMessage error: {e}")
         return False
-
-    p = Path(file_path)
-    if not p.exists():
-        return False
-
-    data = {"chat_id": settings.TELEGRAM_CHAT_ID}
-    if caption:
-        data["caption"] = caption
-
-    with p.open("rb") as f:
-        files = {"document": (p.name, f)}
-        r = requests.post(_api_url("sendDocument"), data=data, files=files, timeout=60)
-    return r.ok
-
-
-def send_telegram_photo(image_path: str | Path, caption: Optional[str] = None) -> bool:
-    if not _has_telegram():
-        return False
-
-    p = Path(image_path)
-    if not p.exists():
-        return False
-
-    data = {"chat_id": settings.TELEGRAM_CHAT_ID}
-    if caption:
-        data["caption"] = caption
-
-    with p.open("rb") as f:
-        files = {"photo": (p.name, f)}
-        r = requests.post(_api_url("sendPhoto"), data=data, files=files, timeout=60)
-    return r.ok
 
 
 def send_chunked_message(text: str, parse_mode: Optional[str] = None) -> None:
-    if not _has_telegram():
+    if not _has_creds():
+        print("[TG] Missing TELEGRAM creds, skipping chunked message.")
         return
 
     max_len = settings.TELEGRAM_MAX_CHARS
+    lines = text.splitlines()
     chunks = []
     cur = []
     cur_len = 0
 
-    for line in text.splitlines():
+    for line in lines:
         add_len = len(line) + 1
-        if cur_len + add_len > max_len and cur:
+        if cur and (cur_len + add_len > max_len):
             chunks.append("\n".join(cur))
             cur = [line]
             cur_len = len(line) + 1
@@ -95,3 +63,47 @@ def send_chunked_message(text: str, parse_mode: Optional[str] = None) -> None:
         send_telegram_message(c, parse_mode=parse_mode)
         if i < len(chunks) - 1:
             time.sleep(0.7)
+
+
+def send_telegram_document(path: str | Path, caption: str | None = None) -> bool:
+    if not _has_creds():
+        print("[TG] Missing TELEGRAM creds, skipping document.")
+        return False
+
+    p = Path(path)
+    if not p.exists():
+        print(f"[TG] Document not found: {p}")
+        return False
+
+    try:
+        with p.open("rb") as f:
+            files = {"document": (p.name, f)}
+            data = {"chat_id": settings.TELEGRAM_CHAT_ID, "caption": caption or ""}
+            r = requests.post(_api("sendDocument"), data=data, files=files, timeout=60)
+            r.raise_for_status()
+            return True
+    except Exception as e:
+        print(f"[TG] sendDocument error: {e}")
+        return False
+
+
+def send_telegram_photo(path: str | Path, caption: str | None = None) -> bool:
+    if not _has_creds():
+        print("[TG] Missing TELEGRAM creds, skipping photo.")
+        return False
+
+    p = Path(path)
+    if not p.exists():
+        print(f"[TG] Photo not found: {p}")
+        return False
+
+    try:
+        with p.open("rb") as f:
+            files = {"photo": (p.name, f)}
+            data = {"chat_id": settings.TELEGRAM_CHAT_ID, "caption": caption or ""}
+            r = requests.post(_api("sendPhoto"), data=data, files=files, timeout=60)
+            r.raise_for_status()
+            return True
+    except Exception as e:
+        print(f"[TG] sendPhoto error: {e}")
+        return False
