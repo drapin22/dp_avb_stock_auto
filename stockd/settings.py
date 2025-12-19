@@ -19,6 +19,7 @@ FORECASTS_FILE = DATA_DIR / "forecasts_stockd.csv"
 
 # Backward-compat aliases (older modules might reference these names)
 FORECASTS_STOCKD = FORECASTS_FILE
+PRICES_FILE = PRICES_HISTORY  # legacy alias sometimes used
 
 # Core model artifacts
 MODEL_STATE_JSON = DATA_DIR / "model_state.json"
@@ -37,6 +38,9 @@ MODEL_EVAL_SUMMARY = REPORTS_DIR / "model_eval_summary.csv"
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+# Telegram hard limit is 4096 chars; keep safety buffer
+TELEGRAM_MAX_CHARS = int(os.getenv("TELEGRAM_MAX_CHARS", "3500"))
 
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
