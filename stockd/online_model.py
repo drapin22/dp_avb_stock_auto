@@ -1,108 +1,97 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-
-@dataclass
-class RidgeConfig:
-    l2: float = 10.0  # regularizare, mare = stabil
-    feature_names: Tuple[str, ...] = (
-        "bias",
-        "ret_20d",
-        "ret_60d",
-        "vol_20d",
-        "max_dd_60d",
-        "beta",
-        "bench_ret_5d",
-        "vix_level",
-        "dxy_ret_5d",
-        "oil_ret_5d",
-        "gold_ret_5d",
-        "ro_proxy_ret_5d",
-    )
+from stockd import settings
 
 
-def _to_float(x, default=0.0) -> float:
-    try:
-        v = float(x)
-        if np.isfinite(v):
-            return v
-        return default
-    except Exception:
-        return default
+DEFAULT_FEATURE_COLS = [
+    "ret_20d",
+    "ret_60d",
+    "vol_20d",
+    "max_dd_60d",
+    "beta",
+    "vix_level",
+    "dxy_ret_5d",
+    "oil_ret_5d",
+    "gold_ret_5d",
+    "bench_ret_5d",
+]
 
 
-def build_X(df: pd.DataFrame, cfg: RidgeConfig) -> np.ndarray:
-    cols = list(cfg.feature_names)
-    X = np.zeros((len(df), len(cols)), dtype=float)
-    for i, c in enumerate(cols):
-        if c == "bias":
-            X[:, i] = 1.0
-        else:
-            X[:, i] = pd.to_numeric(df.get(c), errors="coerce").fillna(0.0).astype(float).values
-    return X
-
-
-def fit_ridge(df: pd.DataFrame, y_col: str, cfg: RidgeConfig) -> Dict:
+def load_state(path: Path | None = None) -> Dict:
     """
-    Returnează dict cu coeficienți.
+    Loads model state from JSON. If missing, returns a safe default state.
     """
-    if df is None or df.empty:
-        return {"ok": False, "reason": "empty_df"}
+    path = Path(path) if path is not None else Path(settings.MODEL_STATE_JSON)
 
-    y = pd.to_numeric(df[y_col], errors="coerce").fillna(0.0).astype(float).values
-    X = build_X(df, cfg)
-
-    # ridge closed-form: (X'X + l2 I)^-1 X'y
-    XtX = X.T @ X
-    I = np.eye(XtX.shape[0])
-    XtX_reg = XtX + cfg.l2 * I
-    Xty = X.T @ y
+    if not path.exists():
+        return {
+            "feature_cols": DEFAULT_FEATURE_COLS,
+            "coef": [0.0] * len(DEFAULT_FEATURE_COLS),
+            "intercept": 0.0,
+            "trained_on_target_date": None,
+            "n_samples": 0,
+        }
 
     try:
-        w = np.linalg.solve(XtX_reg, Xty)
+        state = json.loads(path.read_text(encoding="utf-8"))
+        # minimal validation
+        feature_cols = state.get("feature_cols") or DEFAULT_FEATURE_COLS
+        coef = state.get("coef") or [0.0] * len(feature_cols)
+        if len(coef) != len(feature_cols):
+            coef = [0.0] * len(feature_cols)
+
+        return {
+            "feature_cols": feature_cols,
+            "coef": coef,
+            "intercept": float(state.get("intercept") or 0.0),
+            "trained_on_target_date": state.get("trained_on_target_date"),
+            "n_samples": int(state.get("n_samples") or 0),
+        }
     except Exception:
-        w = np.linalg.lstsq(XtX_reg, Xty, rcond=None)[0]
-
-    return {
-        "ok": True,
-        "l2": cfg.l2,
-        "feature_names": list(cfg.feature_names),
-        "weights": [float(v) for v in w],
-        "n": int(len(df)),
-        "y_mean": float(np.mean(y)) if len(y) else 0.0,
-    }
+        # corrupted file -> fall back
+        return {
+            "feature_cols": DEFAULT_FEATURE_COLS,
+            "coef": [0.0] * len(DEFAULT_FEATURE_COLS),
+            "intercept": 0.0,
+            "trained_on_target_date": None,
+            "n_samples": 0,
+        }
 
 
-def predict(df: pd.DataFrame, model_state: Dict) -> np.ndarray:
-    if not model_state or not model_state.get("ok"):
-        return np.zeros(len(df), dtype=float)
-
-    fn = model_state.get("feature_names", [])
-    w = np.array(model_state.get("weights", []), dtype=float)
-    if not fn or w.size != len(fn):
-        return np.zeros(len(df), dtype=float)
-
-    cfg = RidgeConfig(l2=float(model_state.get("l2", 10.0)), feature_names=tuple(fn))
-    X = build_X(df, cfg)
-    return X @ w
-
-
-def save_state(path: Path, state: Dict) -> None:
+def save_state(state: Dict, path: Path | None = None) -> None:
+    """
+    Saves model state to JSON.
+    """
+    path = Path(path) if path is not None else Path(settings.MODEL_STATE_JSON)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_state(path: Path) -> Dict:
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return {}
+def predict(df: pd.DataFrame, state: Dict | None = None) -> np.ndarray:
+    """
+    Linear model prediction: y = intercept + X @ coef
+    """
+    state = state or load_state()
+    cols: List[str] = list(state.get("feature_cols") or DEFAULT_FEATURE_COLS)
+    coef = np.asarray(state.get("coef") or [0.0] * len(cols), dtype=float)
+    intercept = float(state.get("intercept") or 0.0)
+
+    X = df.copy()
+    for c in cols:
+        if c not in X.columns:
+            X[c] = 0.0
+        X[c] = pd.to_numeric(X[c], errors="coerce").fillna(0.0)
+
+    mat = X[cols].to_numpy(dtype=float)
+    if mat.shape[1] != coef.shape[0]:
+        # mismatch -> return intercept only
+        return np.full((mat.shape[0],), intercept, dtype=float)
+
+    return intercept + mat @ coef
