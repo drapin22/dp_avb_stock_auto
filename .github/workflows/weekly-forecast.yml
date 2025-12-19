@@ -15,40 +15,41 @@ concurrency:
 jobs:
   weekly-forecast:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Sync working copy with origin/main (avoid diverged history)
+      - name: Sync with origin/main
         run: |
           git fetch origin main
           git checkout main
           git reset --hard origin/main
           git clean -fd
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "openai>=1.55.0"
 
-      - name: Run weekly forecast (StockD)
+      - name: Run weekly forecast
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STOCKD_ENABLE_LLM_NEWS_ADJ: "1"
+          STOCKD_ENABLE_MACRO: "1"
         run: |
           python -m stockd.model_weekly
 
-      - name: Commit and push artifacts (rebase-safe)
+      - name: Commit outputs
         run: |
           git config user.name "StockD Agent"
           git config user.email "stockd@bot.com"
@@ -58,11 +59,10 @@ jobs:
             reports/weekly_forecast_*.csv || true
 
           if git diff --cached --quiet; then
-            echo "No forecast changes to commit."
+            echo "No changes."
             exit 0
           fi
 
           git commit -m "Weekly forecast outputs"
-
           git pull --rebase origin main
           git push origin HEAD:main
