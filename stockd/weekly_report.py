@@ -1,163 +1,107 @@
-# stockd/weekly_report.py
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import datetime
 from pathlib import Path
-import numpy as np
-import pandas as pd
+from typing import Dict, Tuple
+
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from stockd import settings
-from stockd.telegram_utils import send_telegram_message, send_telegram_document, send_telegram_photo
-from stockd.evaluation import load_prices, load_forecasts, evaluate_weekly, summarize, dedup_forecasts
-from stockd.calibration import load_calibration, apply_calibration
+from stockd.evaluation import load_forecasts, load_prices, dedup_forecasts, evaluate_weekly, summarize
+from stockd.telegram_utils import send_telegram_document, send_telegram_message, send_telegram_photo
 
 
-def get_week_bounds(run_date: date) -> tuple[date, date]:
-    offset = (run_date.weekday() - 4) % 7
-    week_end = run_date - timedelta(days=offset)
-    week_start = week_end - timedelta(days=4)
-    return week_start, week_end
+def _week_from_latest_forecast(forecasts: pd.DataFrame) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    f = forecasts.dropna(subset=["WeekStart", "TargetDate"]).copy()
+    last_target = f["TargetDate"].max()
+    row = f.loc[f["TargetDate"] == last_target].iloc[0]
+    return pd.Timestamp(row["WeekStart"]).normalize(), pd.Timestamp(row["TargetDate"]).normalize()
 
 
-def _safe_pct(x) -> str:
-    try:
-        return f"{float(x):+.2f}%"
-    except Exception:
-        return "n/a"
+def _plot_bar(eval_df: pd.DataFrame, out_png: Path, title: str) -> None:
+    df = eval_df.sort_values("RealizedReturnPct", ascending=False).copy()
+    labels = [f"{t}" for t in df["Ticker"].tolist()]
+    x = range(len(df))
+
+    plt.figure(figsize=(12, 5))
+    plt.bar(x, df["PredictedReturnPct"], label="Model (raw)")
+    plt.bar(x, df["RealizedReturnPct"], label="Real")
+    plt.xticks(list(x), labels, rotation=45, ha="right")
+    plt.axhline(0, linewidth=1)
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png)
+    plt.close()
 
 
-def _make_chart(df_week: pd.DataFrame, out_path: Path, title: str) -> None:
-    if df_week.empty:
-        return
-
-    df = df_week.copy()
-    df["AbsErrorRaw"] = (df["Realized_Pct"] - df["Model_ER_Pct"]).abs()
-    df = df.sort_values("AbsErrorRaw", ascending=False).head(15)
-
-    x = np.arange(len(df))
-    width = 0.30
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.bar(x - width, df["Model_ER_Pct"].values, width, label="Model ER (raw)")
-    if "Adj_ER_Pct" in df.columns:
-        ax.bar(x, df["Adj_ER_Pct"].values, width, label="Model ER (calibrated)")
-    ax.bar(x + width, df["Realized_Pct"].values, width, label="Realized")
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(df["Ticker"].astype(str).tolist(), rotation=45, ha="right")
-    ax.set_ylabel("Weekly return (%)")
-    ax.set_title(title)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
-    plt.close(fig)
-
-
-def run_weekly_report(run_date: date | None = None) -> dict:
-    if run_date is None:
-        run_date = date.today()
-
-    week_start, week_end = get_week_bounds(run_date)
-
+def run_weekly_report() -> Dict:
     prices = load_prices()
-    forecasts = load_forecasts()
-    forecasts = dedup_forecasts(forecasts)
+    forecasts = dedup_forecasts(load_forecasts())
 
-    eval_df = evaluate_weekly(prices, forecasts)
+    if forecasts.empty or prices.empty:
+        return {"status": "EMPTY", "message": "Missing prices or forecasts."}
+
+    week_start, week_end = _week_from_latest_forecast(forecasts)
+    f_week = forecasts[(forecasts["WeekStart"] == week_start) & (forecasts["TargetDate"] == week_end)].copy()
+    if f_week.empty:
+        return {"status": "EMPTY", "message": "No forecasts found for latest week."}
+
+    eval_df = evaluate_weekly(prices, f_week)
     if eval_df.empty:
-        return {"week_start": week_start, "week_end": week_end, "excel": None, "png": None, "summary": None}
+        return {"status": "EMPTY", "message": "Evaluation produced no rows."}
 
-    # filter pe săptămâna raportată
-    ws = pd.Timestamp(week_start)
-    we = pd.Timestamp(week_end)
-    df_week = eval_df[(pd.to_datetime(eval_df["WeekStart"]) == ws) & (pd.to_datetime(eval_df["TargetDate"]) == we)].copy()
+    settings.MODEL_EVAL_DETAILED.parent.mkdir(parents=True, exist_ok=True)
+    eval_df.to_csv(settings.MODEL_EVAL_DETAILED, index=False)
 
-    # adaugă calibrare și compară
-    calib = load_calibration()
-    if not df_week.empty:
-        tmp = df_week.rename(columns={"Model_ER_Pct": "ER_Pct"})[["Ticker","Region","ER_Pct"]].copy()
-        tmp = apply_calibration(tmp, calib)
-        df_week = df_week.merge(tmp[["Ticker","Region","Adj_ER_Pct"]], on=["Ticker","Region"], how="left")
+    summ = summarize(eval_df)
+    summ_rows = [{"Region": region, **m} for region, m in summ.items()]
+    summ_df = pd.DataFrame(summ_rows)
+    summ_df.to_csv(settings.MODEL_EVAL_SUMMARY, index=False)
 
-        df_week["Adj_Error_Pct"] = df_week["Realized_Pct"] - df_week["Adj_ER_Pct"]
-        df_week["Adj_AbsError_Pct"] = df_week["Adj_Error_Pct"].abs()
+    xlsx_path = settings.REPORTS_DIR / f"weekly_bvb_model_vs_real_{week_end.date()}.xlsx"
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        eval_df.to_excel(writer, index=False, sheet_name="Eval")
+        summ_df.to_excel(writer, index=False, sheet_name="Summary")
 
-        df_week["Raw_DirectionHit"] = df_week["DirectionHit"]
-        df_week["Adj_DirectionHit"] = (np.sign(df_week["Adj_ER_Pct"]) == np.sign(df_week["Realized_Pct"])) & (np.sign(df_week["Adj_ER_Pct"]) != 0)
+    png_path = settings.REPORTS_DIR / f"weekly_chart_{week_start.date()}_{week_end.date()}.png"
+    _plot_bar(eval_df, png_path, title=f"StockD - Model vs Real ({week_start.date()} → {week_end.date()})")
 
-    summary_region = summarize(df_week) if not df_week.empty else pd.DataFrame()
+    overall_hit = float(eval_df["hit"].mean()) if len(eval_df) else 0.0
+    overall_mae = float(eval_df["abs_error_pp"].mean()) if len(eval_df) else 0.0
 
-    # total summary
-    total = {}
-    if not df_week.empty:
-        total = {
-            "n": int(len(df_week)),
-            "hit_raw": float(df_week["Raw_DirectionHit"].mean() * 100.0) if "Raw_DirectionHit" in df_week else float("nan"),
-            "hit_adj": float(df_week["Adj_DirectionHit"].mean() * 100.0) if "Adj_DirectionHit" in df_week else float("nan"),
-            "mae_raw": float(df_week["AbsError_Pct"].mean()),
-            "mae_adj": float(df_week["Adj_AbsError_Pct"].mean()) if "Adj_AbsError_Pct" in df_week else float("nan"),
-        }
-
-    # export Excel + PNG
-    reports_dir = settings.REPORTS_DIR
-    excel_path = reports_dir / f"weekly_bvb_model_vs_real_{week_end.isoformat()}.xlsx"
-    png_path = reports_dir / f"weekly_bvb_model_vs_real_{week_end.isoformat()}.png"
-
-    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        df_week.to_excel(writer, index=False, sheet_name="Per_Ticker")
-        summary_region.to_excel(writer, index=False, sheet_name="Summary_Region")
-        pd.DataFrame([total]).to_excel(writer, index=False, sheet_name="Summary_Total")
-        pd.DataFrame([calib]).to_excel(writer, index=False, sheet_name="Calibration_Meta")
-
-    _make_chart(
-        df_week=df_week,
-        out_path=png_path,
-        title=f"StockD – Model vs Real ({week_start.isoformat()} → {week_end.isoformat()})",
-    )
-
-    # Telegram message
-    msg = [
-        "*StockD weekly report*",
-        f"Week: *{week_start.isoformat()}* → *{week_end.isoformat()}*",
-        f"Names: *{total.get('n','n/a')}*",
-        f"Hit rate raw: *{total.get('hit_raw', float('nan')):.1f}%*",
-        f"Hit rate calibrated: *{total.get('hit_adj', float('nan')):.1f}%*",
-        f"MAE raw: *{total.get('mae_raw', float('nan')):.2f}%*",
-        f"MAE calibrated: *{total.get('mae_adj', float('nan')):.2f}%*",
+    msg_lines = [
+        "StockD weekly report",
+        f"Week: {week_start.date()} → {week_end.date()}",
+        f"Names: {len(eval_df)}",
+        f"Hit rate: {overall_hit*100:.1f}%",
+        f"MAE: {overall_mae:.2f}pp",
         "",
-        "_Excel + chart attached._",
+        "Per region:",
     ]
+    for region, m in summ.items():
+        msg_lines.append(f"{region}: n={int(m['n'])}, hit={m['hit']:.2f}, MAE={m['MAE_pp']:.2f}pp, bias={m['bias_pp']:.2f}pp")
+
+    send_telegram_message("\n".join(msg_lines))
+    send_telegram_photo(png_path, caption=f"Weekly chart {week_start.date()} → {week_end.date()}")
+    send_telegram_document(xlsx_path, caption=f"Weekly report {week_start.date()} → {week_end.date()}")
 
     return {
-        "week_start": week_start,
-        "week_end": week_end,
-        "excel": excel_path,
-        "png": png_path,
-        "summary_text": "\n".join(msg),
+        "status": "OK",
+        "week_start": str(week_start.date()),
+        "week_end": str(week_end.date()),
+        "xlsx": str(xlsx_path),
+        "png": str(png_path),
+        "eval_rows": int(len(eval_df)),
     }
 
 
 def run_and_notify() -> None:
     info = run_weekly_report()
-    if not info.get("excel"):
-        print("[REPORT] Nothing to report.")
-        return
-
-    try:
-        send_telegram_message(info["summary_text"])
-    except Exception as exc:
-        print(f"[TELEGRAM] Could not send message: {exc}")
-
-    try:
-        send_telegram_photo(str(info["png"]), caption=f"Weekly chart {info['week_start']} → {info['week_end']}")
-    except Exception as exc:
-        print(f"[TELEGRAM] Could not send chart: {exc}")
-
-    try:
-        send_telegram_document(str(info["excel"]), caption=f"Weekly report {info['week_start']} → {info['week_end']}")
-    except Exception as exc:
-        print(f"[TELEGRAM] Could not send Excel: {exc}")
+    if info.get("status") != "OK":
+        send_telegram_message(f"Weekly report: {info.get('status')} {info.get('message','')}")
 
 
 if __name__ == "__main__":
