@@ -1,22 +1,22 @@
 Date,WeekStart,TargetDate,ModelVersion,Ticker,Region,HorizonDays,ER_Pct,Notes
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,WINE,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,EL,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,AG,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,H2O,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,SNN,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,AQ,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,SNP,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,TRP,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,AROBS,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,FP,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,TLV,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,ALR,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,GSH,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,HAI,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,NRF,RO,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,BATE.DE,EU,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,LHA.DE,EU,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,BABA,US,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,JD,US,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,NIO,US,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
-2025-12-19,2025-12-22,2025-12-26,StockD_WEEKLY_BASE,PATH,US,5,0.0,"weekly forecast (adj=calib*reliability, clipped)"
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,WINE,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,EL,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,AG,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,H2O,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,SNN,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,AQ,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,SNP,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,TRP,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,AROBS,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,FP,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,TLV,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,ALR,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,GSH,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,HAI,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,NRF,RO,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,BATE.DE,EU,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,LHA.DE,EU,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,BABA,US,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,JD,US,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,NIO,US,5,0.0,weekly auto-forecast for next week
+2025-12-19,2025-12-22,2025-12-26,StockD_V10.7F+,PATH,US,5,0.0,weekly auto-forecast for next week
