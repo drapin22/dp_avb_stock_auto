@@ -1,102 +1,162 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict
+from typing import Dict, List
 
 import pandas as pd
 
 from stockd import settings
-from stockd.evaluation import load_prices, load_forecasts, dedup_forecasts, evaluate_weekly, summarize
-from stockd.telegram_utils import send_telegram_document, send_telegram_message
-from stockd.mentor import run_mentor
+from stockd.features import compute_ticker_features
+from stockd.macro import get_macro_snapshot
+from stockd.online_model import RidgeConfig, fit_ridge, save_state, load_state
+from stockd.mentor import postmortem_and_rules
+from stockd.telegram_utils import send_telegram_message, send_telegram_document
 
 
-def _jsonable(x: Any) -> Any:
-    if isinstance(x, (pd.Timestamp, datetime)):
-        return x.isoformat()
-    if isinstance(x, dict):
-        return {k: _jsonable(v) for k, v in x.items()}
-    if isinstance(x, list):
-        return [_jsonable(v) for v in x]
-    return x
+def _load_forecasts() -> pd.DataFrame:
+    if not settings.FORECASTS_FILE.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(settings.FORECASTS_FILE)
+    for c in ["Date", "WeekStart", "TargetDate"]:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+    df["Region"] = df["Region"].astype(str).str.upper().str.strip()
+    df["ER_Pct"] = pd.to_numeric(df.get("ER_Pct"), errors="coerce").fillna(0.0)
+    df = df.dropna(subset=["WeekStart", "TargetDate", "Ticker", "Region"])
+    return df
 
 
-def _write_json(path: Path, obj: Dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+def _load_prices_history() -> pd.DataFrame:
+    if not settings.PRICES_HISTORY.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(settings.PRICES_HISTORY)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+    df["Region"] = df["Region"].astype(str).str.upper().str.strip()
+    df["Close"] = pd.to_numeric(df.get("Close"), errors="coerce")
+    df = df.dropna(subset=["Date", "Ticker", "Region", "Close"])
+    return df.sort_values(["Ticker","Region","Date"])
+
+
+def _asof_close(df: pd.DataFrame, asof_dt: pd.Timestamp) -> pd.DataFrame:
+    d = df.copy()
+    d = d[d["Date"] <= asof_dt].sort_values(["Ticker","Region","Date"])
+    last = d.groupby(["Ticker","Region"], as_index=False).tail(1)
+    return last[["Ticker","Region","Close"]].rename(columns={"Close": "Close_asof"})
+
+
+def _realized_return(prices: pd.DataFrame, week_start: pd.Timestamp, week_end: pd.Timestamp) -> pd.DataFrame:
+    p = prices[(prices["Date"] >= week_start) & (prices["Date"] <= week_end)].copy()
+    if p.empty:
+        return pd.DataFrame(columns=["Ticker","Region","RealizedReturnPct"])
+
+    p = p.sort_values(["Ticker","Region","Date"])
+    first = p.groupby(["Ticker","Region"])["Close"].first()
+    last = p.groupby(["Ticker","Region"])["Close"].last()
+    rr = (last / first - 1.0) * 100.0
+    out = rr.rename("RealizedReturnPct").reset_index()
+    return out
 
 
 def run_learning() -> None:
-    prices = load_prices()
-    forecasts = dedup_forecasts(load_forecasts())
+    fc = _load_forecasts()
+    px = _load_prices_history()
 
-    if prices.empty or forecasts.empty:
-        send_telegram_message("StockD learning: missing prices or forecasts.")
+    if fc.empty or px.empty:
+        send_telegram_message("StockD learning: missing forecasts or prices_history.")
         return
 
-    last_target = forecasts["TargetDate"].max()
-    f_week = forecasts[forecasts["TargetDate"] == last_target].copy()
-
-    eval_df = evaluate_weekly(prices, f_week)
-    if eval_df.empty:
-        send_telegram_message("StockD learning: evaluation produced no rows.")
+    # ultima săptămână închisă: targetdate max care e < azi
+    today = pd.Timestamp(date.today())
+    fc2 = fc[fc["TargetDate"] < today].copy()
+    if fc2.empty:
+        send_telegram_message("StockD learning: no completed weeks found in forecasts.")
         return
 
-    summ = summarize(eval_df)
-    rows = [{"Region": r, **m} for r, m in summ.items()]
-    summary_df = pd.DataFrame(rows)
+    last_target = fc2["TargetDate"].max()
+    f_week = fc2[fc2["TargetDate"] == last_target].copy()
+    week_start = pd.Timestamp(f_week["WeekStart"].iloc[0]).normalize()
+    week_end = pd.Timestamp(last_target).normalize()
 
-    settings.MODEL_EVAL_DETAILED.parent.mkdir(parents=True, exist_ok=True)
-    eval_df.to_csv(settings.MODEL_EVAL_DETAILED, index=False)
-    summary_df.to_csv(settings.MODEL_EVAL_SUMMARY, index=False)
+    # realized
+    rr = _realized_return(px, week_start, week_end)
+    if rr.empty:
+        send_telegram_message("StockD learning: no realized prices for last completed week.")
+        return
 
-    overall_bias = float(eval_df["bias_pp"].mean())
-    global_multiplier = float(max(0.6, min(1.4, 1.0 - overall_bias / 20.0)))
+    # features as of week_start (folosim close <= week_start)
+    holdings = f_week[["Ticker","Region"]].drop_duplicates()
+    feat_df, _ = compute_ticker_features(px, holdings)
 
-    calib = {
-        "week_end": str(pd.Timestamp(last_target).date()),
-        "global_multiplier": global_multiplier,
-        "clip_pct": 8.0,
-        "computed_from": {"overall_bias_pp": overall_bias, "n": int(len(eval_df))},
-    }
+    # macro snapshot la startul săptămânii
+    macro = get_macro_snapshot(datetime.combine(week_start.date(), datetime.min.time()))
 
-    score_df = eval_df.groupby(["Ticker", "Region"]).agg(
-        n=("hit", "size"),
-        hit=("hit", "mean"),
-        mae=("abs_error_pp", "mean"),
-    ).reset_index()
-    score_df["reliability"] = (0.6 * score_df["hit"].fillna(0.0) + 0.4 * (1.0 / (1.0 + score_df["mae"].fillna(5.0)))).clip(0, 1)
-    score_df.to_csv(settings.SCORES_CSV, index=False)
-    score_df.to_csv(settings.SCORES_CSV_REPORTS, index=False)
+    # map macro series în coloane
+    def get_series(name, key):
+        v = macro.get("series", {}).get(name, {}).get(key, None)
+        return float(v) if v is not None else 0.0
 
-    mentor_status = "SKIPPED_NO_KEY"
-    mentor_overrides = {"status": mentor_status, "items": [], "safe_overrides": {"clip_pct": 8.0, "multiplier_cap": 1.5}}
+    bench_ret_us = macro.get("regions", {}).get("US", {}).get("bench_ret_5d_pct", 0.0) or 0.0
+    bench_ret_eu = macro.get("regions", {}).get("EU", {}).get("bench_ret_5d_pct", 0.0) or 0.0
 
-    if settings.OPENAI_API_KEY:
-        mentor_overrides = run_mentor(eval_df, week_end=pd.Timestamp(last_target))
-        mentor_status = mentor_overrides.get("status", "UNKNOWN")
+    # join training
+    train = f_week.merge(rr, on=["Ticker","Region"], how="left")
+    train = train.merge(feat_df, on=["Ticker","Region"], how="left")
 
-    _write_json(settings.CALIBRATION_JSON, calib)
-    _write_json(settings.CALIBRATION_JSON_REPORTS, calib)
-    _write_json(settings.MENTOR_OVERRIDES_JSON, _jsonable(mentor_overrides))
-    _write_json(settings.MENTOR_OVERRIDES_JSON_REPORTS, _jsonable(mentor_overrides))
+    train["vix_level"] = get_series("VIX", "last")
+    train["dxy_ret_5d"] = get_series("DXY", "ret_5d_pct")
+    train["oil_ret_5d"] = get_series("OIL", "ret_5d_pct")
+    train["gold_ret_5d"] = get_series("GOLD", "ret_5d_pct")
 
+    # region benchmark ret
+    train["bench_ret_5d"] = 0.0
+    train.loc[train["Region"] == "US", "bench_ret_5d"] = float(bench_ret_us)
+    train.loc[train["Region"] == "EU", "bench_ret_5d"] = float(bench_ret_eu)
+    # RO: folosim ro_proxy_ret_5d deja din features
+    train.loc[train["Region"] == "RO", "bench_ret_5d"] = pd.to_numeric(train["ro_proxy_ret_5d"], errors="coerce").fillna(0.0)
+
+    # umple NaN
+    for c in ["ret_20d","ret_60d","vol_20d","max_dd_60d","beta","ro_proxy_ret_5d"]:
+        train[c] = pd.to_numeric(train.get(c), errors="coerce").fillna(0.0)
+
+    train["y"] = pd.to_numeric(train["RealizedReturnPct"], errors="coerce").fillna(0.0)
+
+    # Fit ridge global (simplu, stabil)
+    cfg = RidgeConfig(l2=10.0)
+    state = fit_ridge(train, y_col="y", cfg=cfg)
+    state["trained_on_week_end"] = str(week_end.date())
+    state["trained_rows"] = int(len(train))
+
+    save_state(settings.MODEL_STATE_JSON, state)
+
+    # Mentor postmortem (safe rules)
+    eval_rows = []
+    for _, r in train.iterrows():
+        eval_rows.append({
+            "Ticker": r["Ticker"],
+            "Region": r["Region"],
+            "PredictedER": float(r["ER_Pct"]),
+            "RealizedReturnPct": float(r["RealizedReturnPct"]),
+            "ErrorPP": float(r["ER_Pct"] - r["RealizedReturnPct"]),
+        })
+
+    mentor = postmortem_and_rules(eval_rows, macro_snapshot=macro) if settings.ENABLE_MENTOR else {"ok": False, "reason": "MENTOR_DISABLED"}
+    settings.MENTOR_OVERRIDES_JSON.write_text(json.dumps(mentor, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # notify
     msg = [
         "StockD learning update",
-        f"Week end: {pd.Timestamp(last_target).date()}",
-        f"Eval rows: {len(eval_df)}",
-        f"Mentor: {mentor_status}",
+        f"Week: {week_start.date()} → {week_end.date()}",
+        f"Train rows: {len(train)}",
+        f"Model state ok: {bool(state.get('ok'))}",
+        f"Mentor ok: {bool(mentor.get('ok'))}",
     ]
-    for region, m in summ.items():
-        msg.append(f"{region}: n={int(m['n'])}, hit={m['hit']:.2f}, MAE={m['MAE_pp']:.2f}pp, bias={m['bias_pp']:.2f}pp")
-
     send_telegram_message("\n".join(msg))
-    send_telegram_document(settings.MODEL_EVAL_SUMMARY, caption="Model eval summary")
-    send_telegram_document(settings.SCORES_CSV, caption="Ticker reliability scores")
-    send_telegram_document(settings.CALIBRATION_JSON, caption="Calibration")
-    send_telegram_document(settings.MENTOR_OVERRIDES_JSON, caption="Mentor overrides")
+    send_telegram_document(settings.MODEL_STATE_JSON, caption="model_state.json")
+    send_telegram_document(settings.MENTOR_OVERRIDES_JSON, caption="mentor_overrides.json")
 
 
 if __name__ == "__main__":
