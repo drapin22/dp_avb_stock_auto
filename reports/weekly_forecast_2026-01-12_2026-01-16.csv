@@ -1,0 +1,22 @@
+Date,WeekStart,TargetDate,ModelVersion,Ticker,Region,HorizonDays,ER_Pct,Notes
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,WINE,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,EL,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,AG,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,H2O,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,SNN,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,AQ,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,SNP,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,TRP,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,AROBS,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,FP,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,TLV,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,ALR,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,GSH,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,HAI,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,NRF,RO,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,BATE.DE,EU,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,LHA.DE,EU,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,BABA,US,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,JD,US,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,NIO,US,5,0.0,weekly auto-forecast for next week
+2026-01-11,2026-01-12,2026-01-16,StockD_V10.7F+,PATH,US,5,0.0,weekly auto-forecast for next week
