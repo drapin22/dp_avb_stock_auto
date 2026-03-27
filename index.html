@@ -1,1 +1,762 @@
-<!DOCTYPE html><html><head><title>Test</title></head><body>StockD APEX placeholder - full version uploading</body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StockD APEX — AI Market Intelligence</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #080c10;
+  --surface: #0d1117;
+  --surface2: #161b22;
+  --border: #21262d;
+  --accent: #00ff88;
+  --accent2: #00b4ff;
+  --warn: #ff6b35;
+  --red: #ff4757;
+  --gold: #ffd700;
+  --text: #e6edf3;
+  --muted: #7d8590;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:'DM Sans',sans-serif; min-height:100vh; overflow-x:hidden; }
+body::before { content:''; position:fixed; top:-50%; left:-20%; width:60%; height:80%; background:radial-gradient(ellipse,rgba(0,255,136,0.04) 0%,transparent 70%); pointer-events:none; z-index:0; }
+body::after { content:''; position:fixed; bottom:-30%; right:-10%; width:50%; height:60%; background:radial-gradient(ellipse,rgba(0,180,255,0.04) 0%,transparent 70%); pointer-events:none; z-index:0; }
+.app { position:relative; z-index:1; max-width:1400px; margin:0 auto; padding:0 24px; }
+
+/* Header */
+header { display:flex; align-items:center; justify-content:space-between; padding:22px 0 18px; border-bottom:1px solid var(--border); margin-bottom:24px; }
+.logo { font-family:'Bebas Neue',sans-serif; font-size:28px; letter-spacing:4px; color:var(--accent); text-shadow:0 0 30px rgba(0,255,136,0.4); }
+.logo span { color:var(--text); }
+.logo small { font-size:12px; letter-spacing:2px; color:var(--muted); display:block; margin-top:-4px; }
+.header-right { display:flex; gap:10px; align-items:center; }
+.tg-btn { font-family:'DM Mono',monospace; font-size:10px; color:#fff; background:#229ED9; border:none; padding:7px 14px; border-radius:4px; cursor:pointer; letter-spacing:1px; transition:all 0.2s; }
+.tg-btn:hover { background:#1a8bbf; transform:translateY(-1px); }
+.badge { font-family:'DM Mono',monospace; font-size:10px; color:var(--accent); border:1px solid rgba(0,255,136,0.3); padding:5px 10px; border-radius:2px; letter-spacing:2px; animation:pulse-border 3s infinite; }
+@keyframes pulse-border { 0%,100%{border-color:rgba(0,255,136,0.3)} 50%{border-color:rgba(0,255,136,0.7)} }
+
+/* Disclaimer */
+.disclaimer { background:rgba(255,107,53,0.08); border:1px solid rgba(255,107,53,0.25); border-radius:6px; padding:10px 16px; margin-bottom:20px; font-size:11px; color:#ffad8a; display:flex; align-items:flex-start; gap:8px; line-height:1.6; }
+
+/* Portfolio bar */
+.port-bar { display:grid; grid-template-columns:repeat(5,1fr); gap:14px; margin-bottom:24px; }
+.port-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px 18px; position:relative; overflow:hidden; transition:border-color 0.3s; }
+.port-card:hover { border-color:rgba(0,255,136,0.2); }
+.port-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; background:linear-gradient(90deg,var(--accent),transparent); opacity:0.5; }
+.port-label { font-family:'DM Mono',monospace; font-size:9px; color:var(--muted); letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px; }
+.port-value { font-family:'Bebas Neue',sans-serif; font-size:24px; letter-spacing:1px; }
+.port-value.green { color:var(--accent); }
+.port-value.blue { color:var(--accent2); }
+.port-value.gold { color:var(--gold); }
+.port-sub { font-size:10px; color:var(--muted); margin-top:3px; font-family:'DM Mono',monospace; }
+
+/* Tabs */
+.tabs { display:flex; border-bottom:1px solid var(--border); margin-bottom:24px; gap:0; }
+.tab { font-family:'DM Mono',monospace; font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--muted); padding:12px 20px; cursor:pointer; border-bottom:2px solid transparent; transition:all 0.2s; white-space:nowrap; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.tab-content { display:none; }
+.tab-content.active { display:block; }
+
+/* Main grid */
+.main-grid { display:grid; grid-template-columns:1fr 320px; gap:20px; }
+
+/* Panel */
+.panel { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; margin-bottom:16px; }
+.panel-header { padding:14px 20px 12px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+.panel-title { font-family:'Bebas Neue',sans-serif; font-size:16px; letter-spacing:2px; }
+.panel-tag { font-family:'DM Mono',monospace; font-size:9px; color:var(--accent2); letter-spacing:1px; background:rgba(0,180,255,0.08); padding:3px 8px; border-radius:2px; border:1px solid rgba(0,180,255,0.2); }
+.panel-body { padding:20px; }
+
+/* Inputs */
+label { display:block; font-family:'DM Mono',monospace; font-size:9px; color:var(--muted); letter-spacing:1.5px; text-transform:uppercase; margin-bottom:6px; }
+input, select, textarea { width:100%; background:var(--surface2); border:1px solid var(--border); color:var(--text); font-family:'DM Mono',monospace; font-size:12px; padding:9px 12px; border-radius:4px; outline:none; transition:border-color 0.2s; }
+input:focus, select:focus, textarea:focus { border-color:rgba(0,255,136,0.4); box-shadow:0 0 0 3px rgba(0,255,136,0.06); }
+select option { background:var(--surface2); }
+textarea { resize:vertical; min-height:70px; }
+.input-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
+.input-group { margin-bottom:12px; }
+
+/* Buttons */
+.btn { width:100%; background:var(--accent); color:#000; border:none; font-family:'Bebas Neue',sans-serif; font-size:17px; letter-spacing:3px; padding:11px; border-radius:4px; cursor:pointer; transition:all 0.2s; }
+.btn:hover { background:#00ffaa; box-shadow:0 0 20px rgba(0,255,136,0.3); transform:translateY(-1px); }
+.btn:disabled { background:var(--border); color:var(--muted); cursor:not-allowed; transform:none; box-shadow:none; }
+.btn-sm { background:transparent; color:var(--accent2); border:1px solid rgba(0,180,255,0.25); font-family:'DM Mono',monospace; font-size:10px; letter-spacing:1px; padding:7px 14px; border-radius:4px; cursor:pointer; transition:all 0.2s; width:auto; }
+.btn-sm:hover { background:rgba(0,180,255,0.1); }
+.btn-row { display:flex; gap:8px; margin-top:10px; }
+.btn-row .btn { flex:1; }
+
+/* AI output */
+.ai-output { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:18px; font-size:13px; line-height:1.8; color:var(--text); min-height:180px; }
+.ai-output h4 { font-family:'Bebas Neue',sans-serif; font-size:15px; letter-spacing:2px; color:var(--accent); margin:14px 0 6px; }
+.ai-output h4:first-child { margin-top:0; }
+.ai-output p { margin-bottom:8px; }
+.ai-output ul { margin:6px 0 10px 18px; }
+.ai-output li { margin-bottom:4px; }
+.ai-output strong { color:var(--accent); }
+.ai-output .highlight { background:rgba(0,255,136,0.06); border-left:2px solid var(--accent); padding:8px 12px; margin:10px 0; border-radius:0 4px 4px 0; }
+.ai-placeholder { text-align:center; color:var(--muted); font-family:'DM Mono',monospace; font-size:11px; line-height:2; padding:20px; }
+.ai-placeholder .icon { font-size:32px; display:block; margin-bottom:10px; opacity:0.4; }
+
+/* Signals */
+.signals { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:14px; }
+.sig { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:12px; text-align:center; }
+.sig-label { font-family:'DM Mono',monospace; font-size:9px; color:var(--muted); letter-spacing:1px; text-transform:uppercase; margin-bottom:5px; }
+.sig-val { font-family:'Bebas Neue',sans-serif; font-size:20px; letter-spacing:1px; }
+.sig-val.bullish { color:var(--accent); }
+.sig-val.bearish { color:var(--red); }
+.sig-val.neutral { color:var(--gold); }
+
+/* StockD forecast table */
+.forecast-table { width:100%; border-collapse:collapse; font-size:12px; }
+.forecast-table th { font-family:'DM Mono',monospace; font-size:9px; color:var(--muted); letter-spacing:1px; text-transform:uppercase; padding:8px 10px; border-bottom:1px solid var(--border); text-align:left; }
+.forecast-table td { padding:9px 10px; border-bottom:1px solid rgba(33,38,45,0.5); font-family:'DM Mono',monospace; font-size:11px; }
+.forecast-table tr:hover td { background:rgba(255,255,255,0.02); }
+.forecast-table tr:last-child td { border-bottom:none; }
+.er-positive { color:var(--accent); font-weight:600; }
+.er-negative { color:var(--red); font-weight:600; }
+.er-neutral { color:var(--muted); }
+.region-badge { font-size:9px; padding:2px 6px; border-radius:2px; font-family:'DM Mono',monospace; letter-spacing:1px; }
+.region-RO { background:rgba(0,255,136,0.1); color:var(--accent); border:1px solid rgba(0,255,136,0.2); }
+.region-US { background:rgba(0,180,255,0.1); color:var(--accent2); border:1px solid rgba(0,180,255,0.2); }
+.region-EU { background:rgba(255,215,0,0.1); color:var(--gold); border:1px solid rgba(255,215,0,0.2); }
+
+/* Watchlist sidebar */
+.wl-item { display:flex; align-items:center; justify-content:space-between; padding:12px 20px; border-bottom:1px solid var(--border); cursor:pointer; transition:background 0.15s; }
+.wl-item:last-child { border-bottom:none; }
+.wl-item:hover { background:rgba(255,255,255,0.02); }
+.wl-ticker { font-family:'Bebas Neue',sans-serif; font-size:17px; letter-spacing:1px; color:var(--accent); }
+.wl-name { font-size:10px; color:var(--muted); margin-top:1px; font-family:'DM Mono',monospace; }
+.wl-region { font-family:'DM Mono',monospace; font-size:9px; padding:2px 6px; border-radius:2px; }
+
+/* Signal action btns */
+.signal-actions { display:flex; gap:8px; margin-top:10px; }
+.sig-act-btn { flex:1; background:transparent; border:1px solid var(--border); font-family:'DM Mono',monospace; font-size:10px; letter-spacing:1px; padding:7px; border-radius:4px; cursor:pointer; transition:all 0.2s; color:var(--muted); }
+.sig-act-btn.buy { border-color:rgba(0,255,136,0.3); color:var(--accent); }
+.sig-act-btn.buy:hover { background:rgba(0,255,136,0.08); }
+.sig-act-btn.sell { border-color:rgba(255,71,87,0.3); color:var(--red); }
+.sig-act-btn.sell:hover { background:rgba(255,71,87,0.08); }
+
+/* Spinner */
+.spinner { display:inline-block; width:22px; height:22px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin 0.8s linear infinite; }
+@keyframes spin { to{transform:rotate(360deg)} }
+
+/* Toast */
+.tg-toast { position:fixed; bottom:20px; right:20px; background:#229ED9; color:#fff; font-family:'DM Mono',monospace; font-size:11px; padding:12px 16px; border-radius:6px; z-index:9999; display:none; align-items:center; gap:8px; box-shadow:0 4px 20px rgba(0,0,0,0.4); max-width:300px; animation:slideIn 0.3s ease; }
+@keyframes slideIn { from{transform:translateX(100px);opacity:0} to{transform:translateX(0);opacity:1} }
+
+/* Live dot */
+.live-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--accent); margin-right:6px; animation:pulse-dot 2s infinite; }
+@keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
+
+/* IPO grid */
+.ipo-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px; }
+.ipo-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:18px; cursor:pointer; transition:all 0.2s; }
+.ipo-card:hover { border-color:rgba(0,180,255,0.3); transform:translateY(-2px); }
+.ipo-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; }
+.ipo-co { font-family:'Bebas Neue',sans-serif; font-size:18px; letter-spacing:1px; }
+.ipo-sector { font-size:10px; color:var(--muted); font-family:'DM Mono',monospace; }
+.ipo-score { font-family:'Bebas Neue',sans-serif; font-size:26px; color:var(--accent); line-height:1; }
+.ipo-score-lbl { font-family:'DM Mono',monospace; font-size:8px; color:var(--muted); text-align:right; }
+.ipo-bar { height:3px; background:var(--border); border-radius:2px; margin-bottom:10px; }
+.ipo-bar-fill { height:100%; border-radius:2px; background:linear-gradient(90deg,var(--accent2),var(--accent)); transition:width 0.8s ease; }
+.ipo-stats { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:10px; font-size:10px; font-family:'DM Mono',monospace; color:var(--muted); }
+.ipo-stats strong { color:var(--text); display:block; font-size:12px; }
+.ipo-thesis { font-size:11px; color:var(--muted); line-height:1.6; margin-bottom:10px; }
+.ipo-btn { width:100%; background:rgba(0,180,255,0.08); border:1px solid rgba(0,180,255,0.2); color:var(--accent2); font-family:'DM Mono',monospace; font-size:10px; letter-spacing:1px; padding:7px; border-radius:3px; cursor:pointer; transition:all 0.2s; }
+.ipo-btn:hover { background:rgba(0,180,255,0.15); }
+
+/* Footer */
+footer { border-top:1px solid var(--border); padding:16px 0; font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:1px; display:flex; justify-content:space-between; margin-top:24px; }
+
+@media(max-width:900px) { .main-grid{grid-template-columns:1fr} .port-bar{grid-template-columns:repeat(2,1fr)} .signals{grid-template-columns:repeat(2,1fr)} }
+</style>
+</head>
+<body>
+<div class="app">
+
+<header>
+  <div>
+    <div class="logo">StockD<span> APEX</span></div>
+    <small class="logo">BVB · EU · US · AI POWERED</small>
+  </div>
+  <div class="header-right">
+    <button class="tg-btn" onclick="sendDailySummary()">✈️ DAILY BRIEF</button>
+    <button class="tg-btn" onclick="loadAndSendForecasts()" style="background:#2e7d32">📊 SEND FORECASTS</button>
+    <span class="badge"><span class="live-dot"></span>LIVE</span>
+  </div>
+</header>
+
+<div class="tg-toast" id="tgToast"><span>✈️</span><span id="tgToastMsg"></span></div>
+
+<div class="disclaimer">
+  <span>⚠️</span>
+  <div><strong>Research tool only.</strong> StockD APEX combines your existing BVB/EU/US data pipeline with Claude AI analysis. Not financial advice. Always verify signals independently.</div>
+</div>
+
+<!-- Portfolio Bar -->
+<div class="port-bar">
+  <div class="port-card">
+    <div class="port-label">PORTFOLIO</div>
+    <div class="port-value green">$1,000</div>
+    <div class="port-sub">Starting capital</div>
+  </div>
+  <div class="port-card">
+    <div class="port-label">STOCKD MODEL</div>
+    <div class="port-value blue" style="font-size:16px;">V10.7F+</div>
+    <div class="port-sub">BVB + EU + US</div>
+  </div>
+  <div class="port-card">
+    <div class="port-label">RO TICKERS</div>
+    <div class="port-value gold" id="roCount">15</div>
+    <div class="port-sub">BVB Holdings</div>
+  </div>
+  <div class="port-card">
+    <div class="port-label">AI ENGINE</div>
+    <div class="port-value blue" style="font-size:14px;">CLAUDE</div>
+    <div class="port-sub">claude-sonnet-4</div>
+  </div>
+  <div class="port-card">
+    <div class="port-label">ANALYZED</div>
+    <div class="port-value" id="analyzedCount">0</div>
+    <div class="port-sub">This session</div>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('forecasts')">📊 STOCKD FORECASTS</div>
+  <div class="tab" onclick="switchTab('analyze')">🔍 AI ANALYZER</div>
+  <div class="tab" onclick="switchTab('ipo')">🚀 IPO RADAR</div>
+  <div class="tab" onclick="switchTab('strategy')">🎯 STRATEGY</div>
+</div>
+
+<!-- TAB: StockD Forecasts -->
+<div class="tab-content active" id="tab-forecasts">
+  <div class="main-grid">
+    <div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">WEEKLY FORECASTS — STOCKD ENGINE</span>
+          <div style="display:flex;gap:8px;">
+            <button class="btn-sm" onclick="loadForecasts()">↻ LOAD FROM REPO</button>
+            <button class="btn-sm" onclick="analyzeAllForecasts()">🤖 AI REVIEW ALL</button>
+          </div>
+        </div>
+        <div class="panel-body" style="padding:0;">
+          <div id="forecastTableArea" style="overflow-x:auto;">
+            <div class="ai-placeholder" style="padding:40px;">
+              <span class="icon">📊</span>
+              Click "LOAD FROM REPO" to pull your latest StockD forecasts<br>
+              from data/forecasts_stockd.csv
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="forecastAiArea" style="display:none;">
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">CLAUDE AI — FORECAST REVIEW</span>
+            <span class="panel-tag">STOCKD + CLAUDE</span>
+          </div>
+          <div class="panel-body">
+            <div class="ai-output" id="forecastAiOutput"></div>
+            <div class="signal-actions">
+              <button class="sig-act-btn buy" onclick="sendForecastTelegram()">✈️ SEND TO TELEGRAM</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">YOUR PORTFOLIO</span></div>
+        <div id="watchlistSidebar">
+          <!-- RO tickers -->
+          <div class="wl-item" onclick="quickAnalyze('TLV','RO')"><div><div class="wl-ticker">TLV</div><div class="wl-name">Banca Transilvania</div></div><span class="wl-region region-RO">RO</span></div>
+          <div class="wl-item" onclick="quickAnalyze('SNN','RO')"><div><div class="wl-ticker">SNN</div><div class="wl-name">Nuclearelectrica</div></div><span class="wl-region region-RO">RO</span></div>
+          <div class="wl-item" onclick="quickAnalyze('SNP','RO')"><div><div class="wl-ticker">SNP</div><div class="wl-name">OMV Petrom</div></div><span class="wl-region region-RO">RO</span></div>
+          <div class="wl-item" onclick="quickAnalyze('FP','RO')"><div><div class="wl-ticker">FP</div><div class="wl-name">Fondul Proprietatea</div></div><span class="wl-region region-RO">RO</span></div>
+          <div class="wl-item" onclick="quickAnalyze('WINE','RO')"><div><div class="wl-ticker">WINE</div><div class="wl-name">Purcari Wineries</div></div><span class="wl-region region-RO">RO</span></div>
+          <div class="wl-item" onclick="quickAnalyze('H2O','RO')"><div><div class="wl-ticker">H2O</div><div class="wl-name">Aquila</div></div><span class="wl-region region-RO">RO</span></div>
+          <div class="wl-item" onclick="quickAnalyze('AROBS','RO')"><div><div class="wl-ticker">AROBS</div><div class="wl-name">AROBS Transilvania</div></div><span class="wl-region region-RO">RO</span></div>
+          <div class="wl-item" onclick="quickAnalyze('BABA','US')"><div><div class="wl-ticker">BABA</div><div class="wl-name">Alibaba Group</div></div><span class="wl-region region-US">US</span></div>
+          <div class="wl-item" onclick="quickAnalyze('NIO','US')"><div><div class="wl-ticker">NIO</div><div class="wl-name">NIO Inc.</div></div><span class="wl-region region-US">US</span></div>
+          <div class="wl-item" onclick="quickAnalyze('PATH','US')"><div><div class="wl-ticker">PATH</div><div class="wl-name">UiPath</div></div><span class="wl-region region-US">US</span></div>
+          <div class="wl-item" onclick="quickAnalyze('JD','US')"><div><div class="wl-ticker">JD</div><div class="wl-name">JD.com</div></div><span class="wl-region region-US">US</span></div>
+          <div class="wl-item" onclick="quickAnalyze('BATE.DE','EU')"><div><div class="wl-ticker">BATE.DE</div><div class="wl-name">Bayer AG</div></div><span class="wl-region region-EU">EU</span></div>
+          <div class="wl-item" onclick="quickAnalyze('LHA.DE','EU')"><div><div class="wl-ticker">LHA.DE</div><div class="wl-name">Lufthansa</div></div><span class="wl-region region-EU">EU</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: AI Analyzer -->
+<div class="tab-content" id="tab-analyze">
+  <div class="main-grid">
+    <div>
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">CLAUDE AI DEEP ANALYSIS</span>
+          <span class="panel-tag">AI POWERED</span>
+        </div>
+        <div class="panel-body">
+          <div class="input-row">
+            <div class="input-group">
+              <label>TICKER SYMBOL</label>
+              <input type="text" id="ticker" placeholder="e.g. TLV, NVDA, BABA" style="text-transform:uppercase;">
+            </div>
+            <div class="input-group">
+              <label>MARKET</label>
+              <select id="market">
+                <option value="RO - Bucharest Stock Exchange (BVB)">🇷🇴 BVB (Romanian)</option>
+                <option value="US - NYSE/NASDAQ">🇺🇸 US Markets</option>
+                <option value="EU - European Markets">🇪🇺 EU Markets</option>
+              </select>
+            </div>
+          </div>
+          <div class="input-row">
+            <div class="input-group">
+              <label>TIME HORIZON</label>
+              <select id="horizon">
+                <option value="1 week (5 trading days)">1 Week</option>
+                <option value="1 month" selected>1 Month</option>
+                <option value="3 months">3 Months</option>
+              </select>
+            </div>
+            <div class="input-group">
+              <label>ANALYSIS TYPE</label>
+              <select id="analysisType">
+                <option value="comprehensive">Comprehensive</option>
+                <option value="technical">Technical Only</option>
+                <option value="fundamental">Fundamental Only</option>
+                <option value="momentum">Momentum/Growth</option>
+              </select>
+            </div>
+          </div>
+          <div class="input-group">
+            <label>STOCKD FORECAST DATA (optional — paste from table)</label>
+            <textarea id="stockdContext" placeholder="e.g. StockD ER_Pct: +1.2%, Reliability: 0.75, Region: RO..."></textarea>
+          </div>
+          <div class="btn-row">
+            <button class="btn" onclick="analyzeStock()" id="analyzeBtn">ANALYZE</button>
+            <button class="btn" style="background:var(--surface2);color:var(--accent2);border:1px solid rgba(0,180,255,0.2);font-size:14px;" onclick="scanPortfolio()">SCAN PORTFOLIO</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="resultsArea" style="display:none;">
+        <div class="signals" id="signalsGrid"></div>
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title" id="resultTitle">AI ANALYSIS</span>
+            <span class="panel-tag" id="resultTicker">--</span>
+          </div>
+          <div class="panel-body">
+            <div class="ai-output" id="aiOutput"></div>
+            <div class="signal-actions" id="sigActions" style="display:none;">
+              <button class="sig-act-btn buy" onclick="sendSignal('BUY')">✈️ SEND BUY SIGNAL</button>
+              <button class="sig-act-btn sell" onclick="sendSignal('SELL')">✈️ SEND SELL SIGNAL</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="noResults">
+        <div class="panel"><div class="panel-body"><div class="ai-output"><div class="ai-placeholder"><span class="icon">🔍</span>Select a ticker from your portfolio or enter one above</div></div></div></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">QUICK ANALYZE</span><span class="panel-tag">CLICK</span></div>
+        <div class="wl-item" onclick="quickAnalyze('TLV','RO')"><div><div class="wl-ticker">TLV</div><div class="wl-name">Banca Transilvania</div></div><span class="wl-region region-RO">RO</span></div>
+        <div class="wl-item" onclick="quickAnalyze('SNN','RO')"><div><div class="wl-ticker">SNN</div><div class="wl-name">Nuclearelectrica</div></div><span class="wl-region region-RO">RO</span></div>
+        <div class="wl-item" onclick="quickAnalyze('SNP','RO')"><div><div class="wl-ticker">SNP</div><div class="wl-name">OMV Petrom</div></div><span class="wl-region region-RO">RO</span></div>
+        <div class="wl-item" onclick="quickAnalyze('WINE','RO')"><div><div class="wl-ticker">WINE</div><div class="wl-name">Purcari Wineries</div></div><span class="wl-region region-RO">RO</span></div>
+        <div class="wl-item" onclick="quickAnalyze('AROBS','RO')"><div><div class="wl-ticker">AROBS</div><div class="wl-name">AROBS Transilvania</div></div><span class="wl-region region-RO">RO</span></div>
+        <div class="wl-item" onclick="quickAnalyze('PATH','US')"><div><div class="wl-ticker">PATH</div><div class="wl-name">UiPath</div></div><span class="wl-region region-US">US</span></div>
+        <div class="wl-item" onclick="quickAnalyze('BABA','US')"><div><div class="wl-ticker">BABA</div><div class="wl-name">Alibaba</div></div><span class="wl-region region-US">US</span></div>
+        <div class="wl-item" onclick="quickAnalyze('NIO','US')"><div><div class="wl-ticker">NIO</div><div class="wl-name">NIO Inc.</div></div><span class="wl-region region-US">US</span></div>
+        <div class="wl-item" onclick="quickAnalyze('NVDA','US')"><div><div class="wl-ticker">NVDA</div><div class="wl-name">NVIDIA</div></div><span class="wl-region region-US">US</span></div>
+        <div class="wl-item" onclick="quickAnalyze('BATE.DE','EU')"><div><div class="wl-ticker">BATE.DE</div><div class="wl-name">Bayer AG</div></div><span class="wl-region region-EU">EU</span></div>
+        <div class="wl-item" onclick="quickAnalyze('LHA.DE','EU')"><div><div class="wl-ticker">LHA.DE</div><div class="wl-name">Lufthansa</div></div><span class="wl-region region-EU">EU</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: IPO Radar -->
+<div class="tab-content" id="tab-ipo">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <div>
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:3px;">IPO OPPORTUNITY RADAR</h2>
+      <p style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:2px;">AI-scored growth potential — global + Romanian market focus</p>
+    </div>
+    <button class="btn" style="width:auto;padding:10px 24px;" onclick="loadIPOs()">REFRESH RADAR</button>
+  </div>
+  <div class="ipo-grid" id="ipoGrid">
+    <div style="grid-column:1/-1;text-align:center;padding:50px;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;">
+      <div style="font-size:32px;margin-bottom:12px;opacity:0.4;">🚀</div>
+      Click REFRESH RADAR to scan for IPO opportunities
+    </div>
+  </div>
+</div>
+
+<!-- TAB: Strategy -->
+<div class="tab-content" id="tab-strategy">
+  <div class="main-grid">
+    <div>
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">PORTFOLIO STRATEGY BUILDER</span><span class="panel-tag">STOCKD + CLAUDE</span></div>
+        <div class="panel-body">
+          <div class="input-row">
+            <div class="input-group">
+              <label>PORTFOLIO SIZE ($)</label>
+              <input type="number" id="portSize" value="1000">
+            </div>
+            <div class="input-group">
+              <label>MONTHLY TARGET (%)</label>
+              <input type="number" id="targetRet" value="20">
+            </div>
+          </div>
+          <div class="input-row">
+            <div class="input-group">
+              <label>RISK LEVEL</label>
+              <select id="riskLevel">
+                <option value="aggressive">Aggressive (High Risk)</option>
+                <option value="momentum">Momentum Trading</option>
+                <option value="swing">Swing Trading</option>
+                <option value="balanced">Balanced Growth</option>
+              </select>
+            </div>
+            <div class="input-group">
+              <label>PRIMARY MARKET</label>
+              <select id="primaryMarket">
+                <option value="mixed RO/EU/US (like your StockD portfolio)">Mixed BVB/EU/US</option>
+                <option value="Romanian BVB stocks">Romanian BVB Only</option>
+                <option value="US markets">US Markets</option>
+                <option value="European markets">EU Markets</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn" onclick="buildStrategy()">BUILD MY STRATEGY</button>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="panel" style="height:100%;">
+        <div class="panel-header"><span class="panel-title">STRATEGY OUTPUT</span></div>
+        <div class="panel-body">
+          <div class="ai-output" id="strategyOutput">
+            <div class="ai-placeholder"><span class="icon">🎯</span>Configure parameters and build your AI strategy</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div><span class="live-dot"></span>STOCKD APEX · StockD V10.7F+ · Claude AI · BVB + EU + US</div>
+  <div>NOT FINANCIAL ADVICE · RESEARCH ONLY</div>
+</footer>
+</div>
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────
+const CLAUDE_API = 'https://api.anthropic.com/v1/messages';
+const TG_TOKEN   = '8547164655:AAE1nNEaWPWgVmHz4ZHsnELFyzaQf9Ljvug';
+const TG_CHAT    = '8194583452';
+const GITHUB_RAW = 'https://raw.githubusercontent.com/drapin22/dp_avb_stock_auto/main';
+const GH_TOKEN   = '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';
+let analyzedCount = 0;
+let lastAnalysis = '';
+let lastTicker = '';
+let lastForecasts = [];
+
+// ── TABS
+function switchTab(id) {
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['forecasts','analyze','ipo','strategy'][i]===id));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+}
+
+// ── TELEGRAM
+function showToast(msg, ms=4000) {
+  const t=document.getElementById('tgToast');
+  document.getElementById('tgToastMsg').textContent=msg;
+  t.style.display='flex';
+  setTimeout(()=>t.style.display='none', ms);
+}
+
+async function sendTG(text) {
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat_id:TG_CHAT, text, parse_mode:'HTML', disable_web_page_preview:true})
+    });
+    return (await r.json()).ok;
+  } catch(e){ return false; }
+}
+
+function strip(html){ return html.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim(); }
+
+async function sendSignal(action) {
+  const emoji = action==='BUY'?'🟢':'🔴';
+  const ok = await sendTG(`${emoji} <b>APEX SIGNAL — ${lastTicker}</b>\n━━━━━━━━━━━━━━━\n💰 <b>Action:</b> ${action}\n📝 <b>Analysis:</b>\n${strip(lastAnalysis).substring(0,400)}...\n\n🕐 ${new Date().toLocaleString()}\n<i>⚠️ Not financial advice.</i>`);
+  showToast(ok?`✅ ${action} signal sent!`:'❌ Telegram failed');
+}
+
+async function sendForecastTelegram() {
+  const text = strip(document.getElementById('forecastAiOutput').innerHTML).substring(0,800);
+  const ok = await sendTG(`📊 <b>StockD + Claude Forecast Review</b>\n━━━━━━━━━━━━━━━\n${text}\n\n🕐 ${new Date().toLocaleString()}\n<i>⚠️ Not financial advice.</i>`);
+  showToast(ok?'✅ Forecast review sent to Telegram!':'❌ Failed');
+}
+
+async function sendDailySummary() {
+  showToast('🔄 Generating daily brief...', 12000);
+  try {
+    const forecastSummary = lastForecasts.slice(0,8).map(f=>`${f.Ticker}(${f.Region}):${f.ER_Pct>0?'+':''}${f.ER_Pct}%`).join(', ');
+    const r = await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514', max_tokens:600,
+      system:'You are StockD APEX. Generate a concise daily market briefing in plain text. No HTML. Under 400 chars.',
+      messages:[{role:'user',content:`Daily brief for BVB/EU/US portfolio. StockD latest signals: ${forecastSummary||'no data loaded'}. Target: high monthly returns. Include: market mood, top 2 opportunities, 1 risk.`}]
+    })});
+    const d = await r.json();
+    const summary = d.content?.map(b=>b.text||'').join('')||'Unavailable.';
+    const ok = await sendTG(`📰 <b>StockD APEX Daily Brief</b>\n<i>${new Date().toLocaleDateString('en-GB',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</i>\n━━━━━━━━━━━━━━━\n${summary}\n\n<i>⚠️ Not financial advice.</i>`);
+    showToast(ok?'✅ Daily brief sent to Telegram!':'❌ Failed');
+  } catch(e){ showToast('❌ Error: '+e.message); }
+}
+
+async function loadForecasts() {
+  const area = document.getElementById('forecastTableArea');
+  area.innerHTML = `<div class="ai-placeholder" style="padding:30px;"><div class="spinner" style="display:inline-block;margin-bottom:12px;"></div><br>Loading from GitHub repo...</div>`;
+  try {
+    const r = await fetch(`https://api.github.com/repos/drapin22/dp_avb_stock_auto/contents/data/forecasts_stockd.csv`,{
+      headers:{'Authorization':`token ${GH_TOKEN}`,'Accept':'application/vnd.github.v3+json'}
+    });
+    const meta = await r.json();
+    const csv = atob(meta.content.replace(/\n/g,''));
+    const rows = csv.trim().split('\n');
+    const headers = rows[0].split(',');
+    const data = rows.slice(1).map(r=>{
+      const vals=r.split(',');
+      return Object.fromEntries(headers.map((h,i)=>[h.trim(), (vals[i]||'').trim()]));
+    });
+    const dates = [...new Set(data.map(r=>r.Date))].sort().reverse();
+    const latestDate = dates[0];
+    const latest = data.filter(r=>r.Date===latestDate && r.Ticker);
+    lastForecasts = latest;
+    renderForecastTable(latest, latestDate);
+  } catch(e) {
+    area.innerHTML = `<div class="ai-placeholder" style="padding:30px;color:var(--red);">⚠️ Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderForecastTable(rows, date) {
+  const area = document.getElementById('forecastTableArea');
+  const sorted = [...rows].sort((a,b)=>parseFloat(b.ER_Pct||0)-parseFloat(a.ER_Pct||0));
+  area.innerHTML = `
+    <div style="padding:12px 20px;border-bottom:1px solid var(--border);font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);">
+      StockD V10.7F+ · Week of ${date} · ${rows.length} tickers · Sorted by ER%
+    </div>
+    <table class="forecast-table">
+      <thead><tr>
+        <th>Ticker</th><th>Region</th><th>ER%</th><th>Week Start</th><th>Target Date</th><th>Action</th>
+      </tr></thead>
+      <tbody>
+        ${sorted.map(r=>{
+          const er=parseFloat(r.ER_Pct||0);
+          const cls=er>0.5?'er-positive':er<-0.3?'er-negative':'er-neutral';
+          const sign=er>0?'+':'';
+          return `<tr>
+            <td style="font-weight:600;color:var(--text);">${r.Ticker}</td>
+            <td><span class="region-badge region-${r.Region}">${r.Region}</span></td>
+            <td class="${cls}">${sign}${er.toFixed(2)}%</td>
+            <td>${r.WeekStart||'—'}</td>
+            <td>${r.TargetDate||'—'}</td>
+            <td><button class="ipo-btn" style="padding:3px 8px;font-size:9px;" onclick="quickAnalyzeWithForecast('${r.Ticker}','${r.Region}',${er})">🤖 ANALYZE</button></td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>`;
+}
+
+async function analyzeAllForecasts() {
+  if (!lastForecasts.length) { showToast('Load forecasts first!'); return; }
+  const area = document.getElementById('forecastAiArea');
+  area.style.display='block';
+  const out = document.getElementById('forecastAiOutput');
+  out.innerHTML='<div style="display:flex;align-items:center;gap:10px;color:var(--muted);font-family:\'DM Mono\',monospace;font-size:11px;"><div class="spinner"></div>Claude is reviewing all StockD forecasts...</div>';
+  const lines = lastForecasts.map(f=>`${f.Ticker}(${f.Region}): ER=${f.ER_Pct}%`).join(', ');
+  try {
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:1000,
+      system:`You are StockD APEX. Review forecasts and provide TOP PICKS, AVOID, PORTFOLIO ALLOCATION, MACRO CONTEXT sections using HTML h4 tags.`,
+      messages:[{role:'user',content:`Review StockD V10.7F+ forecasts: ${lines}. $1000 aggressive portfolio.`}]
+    })});
+    const d=await r.json();
+    out.innerHTML=d.content?.map(b=>b.text||'').join('')||'Analysis failed.';
+  } catch(e){ out.innerHTML=`<span style="color:var(--red)">Error: ${e.message}</span>`; }
+}
+
+async function loadAndSendForecasts() {
+  showToast('📊 Loading & sending forecasts...', 8000);
+  await loadForecasts();
+  if (!lastForecasts.length) { showToast('❌ No forecasts loaded'); return; }
+  const top = [...lastForecasts].sort((a,b)=>parseFloat(b.ER_Pct||0)-parseFloat(a.ER_Pct||0)).slice(0,5);
+  const lines = top.map(f=>`${f.ER_Pct>0?'🟢':'🔴'} <b>${f.Ticker}</b> (${f.Region}): ${f.ER_Pct>0?'+':''}${parseFloat(f.ER_Pct).toFixed(2)}%`).join('\n');
+  const ok = await sendTG(`📊 <b>StockD Weekly Forecast</b>\n<i>Model: V10.7F+ · ${new Date().toLocaleDateString()}</i>\n━━━━━━━━━━━━━━━\n<b>Top Signals:</b>\n${lines}\n\n🔗 Open APEX for full analysis\n<i>⚠️ Not financial advice.</i>`);
+  showToast(ok?'✅ Forecasts sent to Telegram!':'❌ Telegram failed');
+}
+
+function quickAnalyze(ticker, region) {
+  switchTab('analyze');
+  document.getElementById('ticker').value = ticker;
+  const marketMap = {'RO':'RO - Bucharest Stock Exchange (BVB)','US':'US - NYSE/NASDAQ','EU':'EU - European Markets'};
+  document.getElementById('market').value = marketMap[region]||'US - NYSE/NASDAQ';
+  analyzeStock();
+}
+
+function quickAnalyzeWithForecast(ticker, region, er) {
+  document.getElementById('stockdContext').value = `StockD V10.7F+ ER_Pct: ${er>0?'+':''}${er.toFixed(2)}%, Region: ${region}, Horizon: 5 days, Model: momentum + macro regime (VIX/DXY) + calibration`;
+  quickAnalyze(ticker, region);
+}
+
+async function analyzeStock() {
+  const ticker = document.getElementById('ticker').value.trim().toUpperCase();
+  const market = document.getElementById('market').value;
+  const horizon = document.getElementById('horizon').value;
+  const type = document.getElementById('analysisType').value;
+  const stockdCtx = document.getElementById('stockdContext').value.trim();
+  if (!ticker) { document.getElementById('ticker').focus(); return; }
+  const btn = document.getElementById('analyzeBtn');
+  btn.disabled=true; btn.textContent='ANALYZING...';
+  document.getElementById('noResults').style.display='none';
+  document.getElementById('resultsArea').style.display='block';
+  document.getElementById('sigActions').style.display='none';
+  document.getElementById('resultTicker').textContent=ticker;
+  document.getElementById('resultTitle').textContent=`${ticker} — AI ANALYSIS`;
+  document.getElementById('signalsGrid').innerHTML=`
+    <div class="sig"><div class="sig-label">Signal</div><div class="sig-val neutral">...</div></div>
+    <div class="sig"><div class="sig-label">Confidence</div><div class="sig-val neutral">...</div></div>
+    <div class="sig"><div class="sig-label">Horizon</div><div class="sig-val neutral">...</div></div>`;
+  const out = document.getElementById('aiOutput');
+  out.innerHTML<`<div style="display:flex;align-items:center;gap:10px;color:var(--muted);font-family:'DM Mono', monospace;font-size:11px;"><div class="spinner"></div>Claude analyzing ${ticker} (${market})...</div>`;
+
+  const prompt = `Analyze ${ticker} on ${market} for ${horizon} horizon. Analysis type: ${type}.${stockdCtx?`\n\nStockD quantitative model data: ${stockdCtx}`:''}
+Investor has $1,000 targeting high monthly returns, aggressive risk tolerance.`;
+
+  try {
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:1000,
+      system:`You are StockD APEX, combining the StockD quantitative engine (V10.7F+) with Claude AI intelligence for BVB Romanian, EU, and US stocks.
+
+For Romanian BVB stocks: consider liquidity, RON currency, local macro (inflation, BNR rates), and sector dynamics specific to Romania.
+For US/EU: standard analysis applies.
+
+If StockD forecast data is provided, incorporate it as your quantitative baseline and enhance with qualitative analysis.
+
+Format with HTML sections:
+<h4>ð SIGNAL</h4>[BULLISH/BEARITH/NEUTRAL with confidence % and one-line reason]
+<h4>ð TECHNICAL PICTURE</h4>[Key patterns, momentum, support/resistance]
+<h4>ð¡ FUNDAMENTAL STRENGTH</h4>[Business quality, sector position, key metrics]
+<h4>ð MACRO & CATALYSTS</h4>[Market conditions affecting this stock, upcoming catalysts]
+<h4>ð¯ TRADE IDEA</h4><div class="highlight">[Specific actionable idea with position size as % of $1000 portfolio. Be realistic.]</div>
+<h4>â ï¸ RISK CHECK</h4>[Key risks and honest probability assessment]
+
+Be concise (2-3 sentences per section). Direct and actionable.`,
+      messages:[{role:'user',content:prompt}]
+    })});
+    const d=await r.json();
+    const text=d.content?.map(b=>b.text||'').join('')||'Analysis failed.';
+    const isBull=text.toLowerCase().includes('bullish');
+    const isBear=text.toLowerCase().includes('bearish');
+    const sig=isBull?BULLISH':isBear?'BEARISH':'NEUTRAL';
+    const cls=isBull?'bullish':isBear?'bearish':'neutral';
+    const conf=(text.match(/(\d{1,3})%/)||['','~60'])[1];
+    document.getElementById('signalsGrid').innerHTML=`<div class="sig"><div class="sig-label">AI Signal</div><div class="sig-val ${cls}">${sig}</div></div>
+      <div class="sig"><div class="sig-label">Confidence</div><div class="sig-val neutral">${conf}%</div></div>
+      <div class="sig"><div class="sig-label">Market</div><div class="sig-val" style="color:var(--accent2);font-size:14px;">${market.split(' ')[0]}</div></div>`;
+    out.innerHTML=text;
+    lastAnalysis=text; lastTicker=ticker;
+    document.getElementById('sigActions').style.display='flex';
+    analyzedCount++;
+    document.getElementById('analyzedCount').textContent=analyzedCount;
+    const ok=await sendTG(`${isBull?\u1f7c2:isBear?\u1f534:\u1f7e1} <b>APEX {ticker} (${market.split(' ')[0]})</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n${\u1f4ca} Signal: <b>${sig}</b>\n${\u1f3af} Confidence: ${conf}%\n${\u1f4dd} ${strip(text).substring(0,300)}...\n\n${\u1f550} ${new Date().toLocaleString()}\n<i>\u26a0\ufe0f Not financial advice.</i>`);
+    if(ok) showToast(`\u2705 ${ticker} signal sent to Telegram!`);
+  } catch(e){ out.innerHTML<`<span style="color:var(--red)">Error: ${e.message}</span>`; }
+  btn.disabled=false; btn.textContent='ANALYZE';
+}
+
+async function scanPortfolio() {
+  const tickers=['TLV(RO)','SNN(RO)','SNP(RO)','FP(RO)','WINE(RO)','PATH(US)','BABA(US)','NIO(US)','BATE.DE(EU)'];
+  const btn=document.getElementById('analyzeBtn');
+  btn.disabled=true;
+  document.getElementById('noResults').style.display='none';
+  document.getElementById('resultsArea').style.display='block';
+  document.getElementById('resultTitle').textContent='PORTFOLIO SCAN';
+  document.getElementById('resultTicker').textContent='ALL';
+  document.getElementById('aiOutput').innerHTML='<div style="display:flex;align-items:center;gap:10px;"><div class="spinner"></div>Scanning full portfolio...</div>';
+  try {
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:1000,
+      system:'You are StockD APEX. Rapid portfolio scan. Use HTML h4 per group. End with top 3 picks and allocation for $1000.',
+      messages:[{role:'user',content:`Scan StockD portfolio: ${tickers.join(', ')}. Mixed BVB/EU/US. $1000 aggressive.`}]
+    })});
+    const d=await r.json();
+    document.getElementById('aiOutput').innerHTML=d.content?.map(b=>b.text||'').join('')||'Scan failed.';
+    document.getElementById('signalsGrid').innerHTML<`<div class="sig"><div class="sig-label">Scanned</div><div class="sig-val neutral">${tickers.length}</div></div><div class="sig"><div class="sig-label">Type</div><div class="sig-val" style="color:var(--accent2);font-size:12px;">FULL PORT</div></div><div class="sig"><div class="sig-label">Markets</div><div class="sig-val" style="font-size:13px;color:var(--gold);">RO/EU/US</div></div>`;
+  } catch(e){ document.getElementById('aiOutput').innerHTML=`<span style="color:var(--red)">Error: ${e.message}</span>`; }
+  btn.disabled=false; btn.textContent='ANALYZE';
+}
+
+async function loadIPOs() {
+  const grid=document.getElementById('ipoGrid');
+  grid.innerHTML<`<div style="grid-column:1/-1;text-align:center;padding:40px;"><div class="spinner" style="display:inline-block;"></div><br>Scanning IPO landscape...</div>`;
+  try {
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:1000,
+      system:'Return ONLY valid JSON array of 6 IPOs. No markdown. Each: {"company":"Name","ticker":"TICK","sector":"Sector","score":85,"stage":"Recent IPO","valuation":"$4B","growthRate":"120% YoY","moat":"advantage","risk":"HIGH","thesis":"thesis","region":"US/RO/EU"}',
+      messages:[{role:'user',content:' high-growth IPO opportunities 2025-2026. Mix global AI/tech and Romanian/Eastern European. Aggressive retail investor.'}]
+    })});
+    const d=await r.json();
+    let txt=d.content?.map(b=>b.text||'').join('')||'[]';
+    txt=txt.replace(/```json|```/g,'').trim();
+    let ipos; try{ipos=JSON.parse(txt);}catch(e){ipos=[];}
+    if(!ipos.length) throw new Error('No data');
+    grid.innerHTML=ipos.map(ipo=>`<div class="ipo-card" onclick="quickAnalyze('${ipo.ticker}','${ipo.region||'US'}')">
+        <div class="ipo-head"><div><div class="ipo-co">${ipo.company}</div><div class="ipo-sector">${ipo.sector} \u00b7 ${ipo.stage} \u00b7 ${ipo.region||'?'}</div></div><div><div class="ipo-score">${ipo.score}</div><div class="ipo-score-lbl">APEX SCORE</div></div></div>
+        <div class="ipo-bar"><div class="ipo-bar-fill" style="width:${ipo.score}%"></div></div>
+        <div class="ipo-stats"><div><strong>${ipo.ticker}</strong>Ticker</div><div><strong>${ipo.valuation}</strong>Valuation</div><div><strong>${ipo.growthRate}</strong>Growth</div><div><strong style="color:${ipo.risk==='HIGH'?'var(--red)':'var(--warn)'}">${ipo.risk}</strong>Risk</div></div>
+        <p class="ipo-thesis">${ipo.thesis}</p><button class="ipo-btn">\u1f916 DEEP ANALYZE \u2192</button></div>`).join('');
+    const top=ipos[0];
+    await sendTG(`\u1f680 <b>APEX IPO RADAR</b>\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u1f3c6 Top: <b>${top.company} (${top.ticker})</b>\n\u1f4ca Score: ${top.score}/100 | Risk: ${top.risk}\n\u1f4a1 ${top.thesis}\n\n<i>\u26a0\ufe0f Not financial advice.</i>`);
+  } catch(e){ grid.innerHTML<`<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--red);">\u26a0\ufe0f ${e.message}</div>`; }
+}
+
+async function buildStrategy() {
+  const size=document.getElementById('portSize').value;
+  const target=document.getElementById('targetRet').value;
+  const risk=document.getElementById('riskLevel').value;
+  const market=document.getElementById('primaryMarket').value;
+  const out=document.getElementById('strategyOutput');
+  out.innerHTML='<div style="display:flex;align-items:center;gap:10px;"><div class="spinner"></div>Building strategy...</div>';
+  try {
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:1000,
+      system:'You are StockD APEX strategy advisor. Build actionable strategies using HTML h4 headers. Reference StockD model approach. Be realistic about risk.',
+      messages:[{role:'user',content:`Build a ${risk} strategy for: $${size} portfolio, ${target}% monthly target, ${market} markets. Include: position sizing, stop-loss rules, how to use StockD ER% signals, realistic expectations for BVB/EU/US.`}]
+    })});
+    const d=await r.json();
+    out.innerHTML=d.content?.map(b=>b.text||'').join('')||'Strategy generation failed.';
+  } catch(e){ out.innerHTML<`<span style="color:var(--red)">Error: ${e.message}</span>`; }
+}
+
+document.getElementById('ticker').addEventListener('keydown',e=>{if(e.key==='Enter')analyzeStock();});
+</script>
+</body>
+</html>
