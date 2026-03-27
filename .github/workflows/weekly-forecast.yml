@@ -1,1 +1,153 @@
-# test
+name: Weekly Forecast (Sunday 10:00)
+
+on:
+  schedule:
+    - cron: "0 10 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repo-main-writer
+  cancel-in-progress: false
+
+jobs:
+  weekly-forecast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync with origin/main
+        run: |
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+          git clean -fd
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade "openai>=1.55.0" requests
+
+      - name: Run weekly forecast (StockD engine)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STOCKD_ENABLE_LLM_NEWS_ADJ: "1"
+          STOCKD_ENABLE_MACRO: "1"
+        run: |
+          python -m stockd.model_weekly
+
+      - name: Claude AI Review of Forecasts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'EOF'
+          import os, json, csv, requests
+
+          ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY","")
+          TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN","")
+          TG_CHAT  = os.environ.get("TELEGRAM_CHAT_ID","")
+
+          # Load latest forecasts
+          rows = []
+          try:
+              with open("data/forecasts_stockd.csv") as f:
+                  reader = csv.DictReader(f)
+                  all_rows = list(reader)
+                  dates = sorted(set(r["Date"] for r in all_rows), reverse=True)
+                  latest_date = dates[0] if dates else None
+                  rows = [r for r in all_rows if r.get("Date","").startswith(latest_date[:10])] if latest_date else []
+          except Exception as e:
+              print(f"Could not load forecasts: {e}")
+
+          if not rows or not ANTHROPIC_KEY:
+              print("Skipping Claude review - no data or no key")
+              exit(0)
+
+          # Build summary for Claude
+          forecast_str = ", ".join([
+              f"{r['Ticker']}({r['Region']}):ER={r.get('ER_Pct','0')}%"
+              for r in sorted(rows, key=lambda x: float(x.get('ER_Pct',0) or 0), reverse=True)[:12]
+          ])
+
+          # Call Claude API
+          resp = requests.post(
+              "https://api.anthropic.com/v1/messages",
+              headers={
+                  "Content-Type": "application/json",
+                  "x-api-key": ANTHROPIC_KEY,
+                  "anthropic-version": "2023-06-01"
+              },
+              json={
+                  "model": "claude-sonnet-4-20250514",
+                  "max_tokens": 600,
+                  "messages": [{
+                      "role": "user",
+                      "content": f"Review StockD V10.7F+ weekly forecasts: {forecast_str}. Give: top 3 picks with brief reason, 1 avoid, overall portfolio mood. Plain text, under 400 chars."
+                  }]
+              },
+              timeout=30
+          )
+
+          review = ""
+          try:
+              data = resp.json()
+              review = "".join(b.get("text","") for b in data.get("content",[]))
+          except:
+              review = "Claude review unavailable"
+
+          # Format Telegram message
+          top5 = sorted(rows, key=lambda x: float(x.get('ER_Pct',0) or 0), reverse=True)[:5]
+          lines = "\n".join([
+              f"{'🟢' if float(r.get('ER_Pct',0) or 0)>0 else '🔴'} {r['Ticker']} ({r['Region']}): {'+' if float(r.get('ER_Pct',0) or 0)>0 else ''}{float(r.get('ER_Pct',0) or 0):.2f}%"
+              for r in top5
+          ])
+
+          msg = f"""📊 <b>StockD APEX Weekly Forecast</b>
+          <i>Model: V10.7F+ · {latest_date}</i>
+          ━━━━━━━━━━━━━━━
+          <b>Top Signals:</b>
+          {lines}
+
+          🤖 <b>Claude Review:</b>
+          {review[:350]}
+
+          <i>⚠️ Not financial advice.</i>"""
+
+          # Send to Telegram
+          requests.post(
+              f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+              json={"chat_id": TG_CHAT, "text": msg, "parse_mode": "HTML"},
+              timeout=15
+          )
+          print("Claude review sent to Telegram!")
+          EOF
+
+      - name: Commit outputs
+        run: |
+          git config user.name "StockD Agent"
+          git config user.email "stockd@bot.com"
+          git add \
+            data/forecasts_stockd.csv \
+            reports/weekly_forecast_*.csv || true
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git commit -m "Weekly forecast outputs + Claude review"
+          git pull --rebase origin main
+          git push origin HEAD:main
