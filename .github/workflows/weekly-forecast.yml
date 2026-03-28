@@ -15,6 +15,7 @@ concurrency:
 jobs:
   weekly-forecast:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,7 +60,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python3 - <<'PYEOF'
+          python3 << 'PYEOF'
           import os, csv, requests
           ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY","")
           TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN","")
@@ -84,39 +85,45 @@ jobs:
           except Exception:
               pass
           if not rows or not ANTHROPIC_KEY:
-              print("Skipping Claude review")
+              print("Skipping Claude review - no data or key")
               exit(0)
           forecast_str = ", ".join([
-              f"{r['Ticker']}({r['Region']}):ER={r.get('ER_Pct','0')}%,conf={r.get('confidence_tier','?')}"
-              for r in sorted(rows, key=lambda x: float(x.get('ER_Pct',0) or 0), reverse=True)[:12]
+              f"{r['Ticker']}({r['Region']}):ER={r.get('ER_Pct','0')}%"
+              for r in sorted(rows, key=lambda x: float(x.get('ER_Pct',0) or 0), reverse=True)[:10]
           ])
           resp = requests.post(
               "https://api.anthropic.com/v1/messages",
               headers={"Content-Type":"application/json","x-api-key":ANTHROPIC_KEY,"anthropic-version":"2023-06-01"},
-              json={"model":"claude-sonnet-4-20250514","max_tokens":700,
-                    "messages":[{"role":"user","content":f"Review StockD forecasts: {forecast_str}. {perf_ctx} Top 3 picks with rationale, 1 avoid, market mood. Max 400 chars."}]},
+              json={"model":"claude-sonnet-4-20250514","max_tokens":600,
+                    "messages":[{"role":"user","content":f"Review StockD forecasts: {forecast_str}. {perf_ctx} Top 3 picks with rationale, 1 avoid, market mood. Max 380 chars."}]},
               timeout=30
           )
-          review = ""
+          review = "Review unavailable"
           try:
               review = "".join(b.get("text","") for b in resp.json().get("content",[]))
           except Exception:
-              review = "Review unavailable"
+              pass
           top5 = sorted(rows, key=lambda x: float(x.get('ER_Pct',0) or 0), reverse=True)[:5]
           lines = "\n".join([
-              f"{'🟢' if float(r.get('ER_Pct',0) or 0)>0 else '🔴'} <b>{r['Ticker']}</b> ({r['Region']}): {float(r.get('ER_Pct',0) or 0):+.2f}% [{r.get('confidence_tier','?')}]"
+              ("🟢" if float(r.get('ER_Pct',0) or 0)>0 else "🔴") + f" <b>{r['Ticker']}</b> ({r['Region']}): {float(r.get('ER_Pct',0) or 0):+.2f}%"
               for r in top5
           ])
-          msg = f"📊 <b>StockD APEX Weekly Forecast</b>\n<i>V10.7F+ · {latest_date}</i>\n━━━━━━━━━━━━━━━\n<b>Top Signals:</b>\n{lines}\n\n🤖 <b>Claude Review:</b>\n{review[:400]}\n\n<i>⚠️ Not financial advice.</i>"
+          msg = f"📊 <b>StockD APEX Weekly Forecast</b>\n<i>V10.7F+ · {latest_date}</i>\n━━━━━━━━━━━━━━━\n<b>Top Signals:</b>\n{lines}\n\n🤖 <b>Claude Review:</b>\n{review[:380]}\n\n<i>⚠️ Not financial advice.</i>"
           requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",json={"chat_id":TG_CHAT,"text":msg,"parse_mode":"HTML"},timeout=15)
-          print("Claude review sent!")
+          print("Done!")
           PYEOF
 
       - name: Commit all outputs
         run: |
           git config user.name "StockD Agent"
           git config user.email "stockd@bot.com"
-          git add data/forecasts_stockd.csv data/prices_history.csv data/model_state.json data/backtest_eval.csv data/scores_stockd.csv reports/ || true
+          git add \
+            data/forecasts_stockd.csv \
+            data/prices_history.csv \
+            data/model_state.json \
+            data/backtest_eval.csv \
+            data/scores_stockd.csv \
+            reports/ || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
