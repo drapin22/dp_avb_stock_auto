@@ -8,5 +8,5 @@ python-dateutil
 matplotlib
 feedparser
 numpy
-scikit-learn
 xgboost
+scikit-learn
