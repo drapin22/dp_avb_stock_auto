@@ -467,15 +467,15 @@ footer { border-top:1px solid var(--border); padding:16px 0; font-family:'DM Mon
 <script>
 // ── CONFIG ────────────────────────────────────────────────
 const CLAUDE_API = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_KEY = localStorage.getItem('apex_anthropic_key')||'';
-const TG_TOKEN = localStorage.getItem('apex_tg_token')||'';
-const TG_CHAT  = localStorage.getItem('apex_tg_chat')||'';
 const GITHUB_RAW = 'https://raw.githubusercontent.com/drapin22/dp_avb_stock_auto/main';
-// GH_TOKEN removed (repo is public)
-let analyzedCount = 0;
-let lastAnalysis = '';
-let lastTicker = '';
-let lastForecasts = [];
+function getCfg() {
+  return {
+    ak: localStorage.getItem('apex_anthropic_key')||'',
+    tt: localStorage.getItem('apex_tg_token')||'',
+    tc: localStorage.getItem('apex_tg_chat')||''
+  };
+}
+let analyzedCount = 0, lastAnalysis = '', lastTicker = '', lastForecasts = [];
 
 // ── TABS
 function switchTab(id) {
@@ -493,10 +493,12 @@ function showToast(msg, ms=4000) {
 }
 
 async function sendTG(text) {
+  const {tt, tc} = getCfg();
+  if (!tt) { showToast('⚠️ Set Telegram token first'); return false; }
   try {
-    const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,{
+    const r = await fetch('https://api.telegram.org/bot' + tt + '/sendMessage', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:TG_CHAT, text, parse_mode:'HTML', disable_web_page_preview:true})
+      body:JSON.stringify({chat_id:tc, text, parse_mode:'HTML', disable_web_page_preview:true})
     });
     return (await r.json()).ok;
   } catch(e){ return false; }
@@ -520,7 +522,7 @@ async function sendDailySummary() {
   showToast('🔄 Generating daily brief...', 12000);
   try {
     const forecastSummary = lastForecasts.slice(0,8).map(f=>`${f.Ticker}(${f.Region}):${f.ER_Pct>0?'+':''}${f.ER_Pct}%`).join(', ');
-    const r = await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const r = await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':getCfg().ak,'anthropic-version':'2023-06-01'},body:JSON.stringify({
       model:'claude-sonnet-4-20250514', max_tokens:600,
       system:'You are StockD APEX. Generate a concise daily market briefing in plain text. No HTML. Under 400 chars.',
       messages:[{role:'user',content:`Daily brief for BVB/EU/US portfolio. StockD latest signals: ${forecastSummary||'no data loaded'}. Target: high monthly returns. Include: market mood, top 2 opportunities, 1 risk.`}]
@@ -534,26 +536,24 @@ async function sendDailySummary() {
 
 async function loadForecasts() {
   const area = document.getElementById('forecastTableArea');
-  area.innerHTML = `<div class="ai-placeholder" style="padding:30px;"><div class="spinner" style="display:inline-block;margin-bottom:12px;"></div><br>Loading from GitHub repo...</div>`;
+  area.innerHTML = '<div class="ai-placeholder" style="padding:30px;"><div class="spinner" style="display:inline-block;margin-bottom:12px;"></div><br>Loading from GitHub repo...</div>';
   try {
-    const r = await fetch(`https://api.github.com/repos/drapin22/dp_avb_stock_auto/contents/data/forecasts_stockd.csv`,{
-      headers:{'Authorization':`token ${GH_TOKEN}`,'Accept':'application/vnd.github.v3+json'}
-    });
-    const meta = await r.json();
-    const csv = atob(meta.content.replace(/\n/g,''));
+    const r = await fetch(GITHUB_RAW + '/data/forecasts_stockd.csv?' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const csv = await r.text();
     const rows = csv.trim().split('\n');
     const headers = rows[0].split(',');
-    const data = rows.slice(1).map(r=>{
-      const vals=r.split(',');
-      return Object.fromEntries(headers.map((h,i)=>[h.trim(), (vals[i]||'').trim()]));
+    const data = rows.slice(1).map(row => {
+      const vals = row.split(',');
+      return Object.fromEntries(headers.map((h,i) => [h.trim(), (vals[i]||'').trim()]));
     });
     const dates = [...new Set(data.map(r=>r.Date))].sort().reverse();
     const latestDate = dates[0];
-    const latest = data.filter(r=>r.Date===latestDate && r.Ticker);
+    const latest = data.filter(r => r.Date === latestDate && r.Ticker);
     lastForecasts = latest;
     renderForecastTable(latest, latestDate);
   } catch(e) {
-    area.innerHTML = `<div class="ai-placeholder" style="padding:30px;color:var(--red);">⚠️ Failed to load: ${e.message}</div>`;
+    area.innerHTML = '<div class="ai-placeholder" style="padding:30px;color:var(--red);">⚠️ Failed: ' + e.message + '</div>';
   }
 }
 
@@ -594,7 +594,7 @@ async function analyzeAllForecasts() {
   out.innerHTML='<div style="display:flex;align-items:center;gap:10px;color:var(--muted);font-family:\'DM Mono\',monospace;font-size:11px;"><div class="spinner"></div>Claude is reviewing all StockD forecasts...</div>';
   const lines = lastForecasts.map(f=>`${f.Ticker}(${f.Region}): ER=${f.ER_Pct}%`).join(', ');
   try {
-    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':getCfg().ak,'anthropic-version':'2023-06-01'},body:JSON.stringify({
       model:'claude-sonnet-4-20250514',max_tokens:1000,
       system:`You are StockD APEX. Review forecasts and provide TOP PICKS, AVOID, PORTFOLIO ALLOCATION, MACRO CONTEXT sections using HTML h4 tags.`,
       messages:[{role:'user',content:`Review StockD V10.7F+ forecasts: ${lines}. $1000 aggressive portfolio.`}]
@@ -652,7 +652,7 @@ async function analyzeStock() {
 Investor has $1,000 targeting high monthly returns, aggressive risk tolerance.`;
 
   try {
-    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':getCfg().ak,'anthropic-version':'2023-06-01'},body:JSON.stringify({
       model:'claude-sonnet-4-20250514',max_tokens:1000,
       system:`You are StockD APEX, combining the StockD quantitative engine (V10.7F+) with Claude AI intelligence for BVB Romanian, EU, and US stocks.
 
@@ -703,7 +703,7 @@ async function scanPortfolio() {
   document.getElementById('resultTicker').textContent='ALL';
   document.getElementById('aiOutput').innerHTML='<div style="display:flex;align-items:center;gap:10px;"><div class="spinner"></div>Scanning full portfolio...</div>';
   try {
-    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':getCfg().ak,'anthropic-version':'2023-06-01'},body:JSON.stringify({
       model:'claude-sonnet-4-20250514',max_tokens:1000,
       system:'You are StockD APEX. Rapid portfolio scan. Use HTML h4 per group. End with top 3 picks and allocation for $1000.',
       messages:[{role:'user',content:`Scan StockD portfolio: ${tickers.join(', ')}. Mixed BVB/EU/US. $1000 aggressive.`}]
@@ -719,7 +719,7 @@ async function loadIPOs() {
   const grid=document.getElementById('ipoGrid');
   grid.innerHTML<`<div style="grid-column:1/-1;text-align:center;padding:40px;"><div class="spinner" style="display:inline-block;"></div><br>Scanning IPO landscape...</div>`;
   try {
-    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':getCfg().ak,'anthropic-version':'2023-06-01'},body:JSON.stringify({
       model:'claude-sonnet-4-20250514',max_tokens:1000,
       system:'Return ONLY valid JSON array of 6 IPOs. No markdown. Each: {"company":"Name","ticker":"TICK","sector":"Sector","score":85,"stage":"Recent IPO","valuation":"$4B","growthRate":"120% YoY","moat":"advantage","risk":"HIGH","thesis":"thesis","region":"US/RO/EU"}',
       messages:[{role:'user',content:' high-growth IPO opportunities 2025-2026. Mix global AI/tech and Romanian/Eastern European. Aggressive retail investor.'}]
@@ -747,7 +747,7 @@ async function buildStrategy() {
   const out=document.getElementById('strategyOutput');
   out.innerHTML='<div style="display:flex;align-items:center;gap:10px;"><div class="spinner"></div>Building strategy...</div>';
   try {
-    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const r=await fetch(CLAUDE_API,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':getCfg().ak,'anthropic-version':'2023-06-01'},body:JSON.stringify({
       model:'claude-sonnet-4-20250514',max_tokens:1000,
       system:'You are StockD APEX strategy advisor. Build actionable strategies using HTML h4 headers. Reference StockD model approach. Be realistic about risk.',
       messages:[{role:'user',content:`Build a ${risk} strategy for: $${size} portfolio, ${target}% monthly target, ${market} markets. Include: position sizing, stop-loss rules, how to use StockD ER% signals, realistic expectations for BVB/EU/US.`}]
