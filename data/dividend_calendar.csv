@@ -1,0 +1,15 @@
+Ticker,ExDivDate,DividendRON,Yield_pct,Notes
+TLV,2025-05-15,0.76,4.2,Banca Transilvania 2024 dividend
+TLV,2026-05-14,0.82,4.5,Banca Transilvania 2025 dividend (est)
+SNN,2025-06-10,3.50,8.1,Nuclearelectrica 2024 dividend
+SNN,2026-06-09,3.80,8.8,Nuclearelectrica 2025 dividend (est)
+SNP,2025-04-28,0.035,7.2,OMV Petrom 2024 dividend
+SNP,2026-04-27,0.038,7.8,OMV Petrom 2025 dividend (est)
+FP,2025-05-20,0.62,9.1,Fondul Proprietatea 2024 dividend
+EL,2025-05-08,1.85,10.2,Electrica 2024 dividend
+EL,2026-05-07,2.00,11.0,Electrica 2025 dividend (est)
+ALR,2025-06-15,0.42,6.8,Alro 2024 dividend
+WINE,2025-04-30,0.45,5.5,Purcari Wineries 2024 dividend
+H2O,2025-05-22,0.28,4.8,Aquila 2024 dividend
+AQ,2025-05-25,0.18,3.9,Aquila Part 2024 dividend
+AG,2025-06-05,0.52,7.3,Antibiotice 2024 dividend
