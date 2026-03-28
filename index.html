@@ -714,5 +714,48 @@ async function generateMarketPulse(topSignals){
 }
 
 </script>
+
+<script>
+window.openNewTab = function(id) {
+  var RAW2 = 'https://raw.githubusercontent.com/drapin22/dp_avb_stock_auto/main';
+  var titles = {financials:'Financials',calendar:'Calendar',track:'Track Record',model:'Model Info'};
+  var w = window.open('','stockd_'+id);
+  w.document.write('<html><head><title>StockD '+titles[id]+'</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap"><style>*{box-sizing:border-box;margin:0;padding:0}body{background:#0a0d12;color:#e8eef8;font-family:Inter,sans-serif;padding:20px}h2{font-size:16px;margin-bottom:16px;color:#00e87a}.card{background:#111520;border:1px solid #1e2a3a;border-radius:12px;padding:16px;margin-bottom:14px}.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(30,42,58,.4);font-size:12px}.row:last-child{border:none}.lbl{color:#8b9ab5}.val{font-family:'JetBrains Mono',monospace;font-weight:600}.pos{color:#00e87a}.neg{color:#ff3d5a}.earn{color:#f5c518}.reg{font-size:9px;padding:2px 5px;border-radius:3px;font-weight:600;font-family:monospace}.RO{background:rgba(0,232,122,.08);color:#00e87a;border:1px solid rgba(0,232,122,.18)}.US{background:rgba(59,130,246,.08);color:#60a5fa;border:1px solid rgba(59,130,246,.18)}.EU{background:rgba(245,197,24,.08);color:#f5c518;border:1px solid rgba(245,197,24,.18)}.spin{display:inline-block;width:14px;height:14px;border:2px solid #1e2a3a;border-top-color:#00e87a;border-radius:50%;animation:sp .7s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}</style></head><body>');
+  w.document.write('<h2>'+titles[id]+'</h2><div id="content"><div style="display:flex;align-items:center;gap:8px;color:#4a5a72;padding:20px"><div class=spin></div>Loading...</div></div>');
+  w.document.write('<script>');
+  w.document.write('fetch("'+RAW2+'/data/financial_statements.json?t="+Date.now()).then(r=>r.json()).then(fin=>{');
+  w.document.write('fetch("'+RAW2+'/data/forecasts_stockd.csv?t="+Date.now()).then(r=>r.text()).then(csv=>{');
+  w.document.write('var rows=csv.trim().split("\n"),hdrs=rows[0].split(",").map(h=>h.trim());');
+  w.document.write('var all=rows.slice(1).map(row=>{var v=row.split(","),o={};hdrs.forEach((k,i)=>o[k]=(v[i]||"").trim());o.er=parseFloat(o.ER_Pct||0);return o;});');
+  w.document.write('var dates=[...new Set(all.map(r=>r.Date))].filter(Boolean).sort().reverse();');
+  w.document.write('var best=dates[0];for(var d of dates)if(all.filter(r=>r.Date===d).some(r=>Math.abs(r.er)>0.01)){best=d;break;}');
+  w.document.write('var lat=all.filter(r=>r.Date===best);');
+  if(id==='financials') {
+  w.document.write('var c=document.getElementById("content"),html="";');
+  w.document.write('Object.entries(fin.companies||{}).forEach(([t,co])=>{');
+  w.document.write('var a=co.annual&&co.annual[0]||{},q=co.quarterly||[];');
+  w.document.write('var f=lat.find(r=>r.Ticker===t)||{er:0};');
+  w.document.write('var ec=f.er>0?"pos":f.er<0?"neg":"";');
+  w.document.write('html+='<div class="card">';');
+  w.document.write('html+='<div style="display:flex;justify-content:space-between;margin-bottom:10px"><div><b>'+t+'</b><span style="color:#8b9ab5;font-size:11px;margin-left:6px">'+co.name+'</span><span class="reg '+co.region+'" style="margin-left:6px">'+co.region+'</span></div>';');
+  w.document.write('html+='<span class="'+ec+'" style="font-family:monospace;font-weight:700">'+( f.er?(f.er>0?"+":"")+f.er.toFixed(2)+"%":"&mdash;")+'</span></div>';');
+  w.document.write('if(a.revenue_m)html+='<div class="row"><span class="lbl">Revenue</span><span class="val">'+a.revenue_m.toLocaleString()+"M</span></div>";');
+  w.document.write('var pnl=a.net_profit_m||-(a.net_loss_m||0)||0;');
+  w.document.write('if(pnl)html+='<div class="row"><span class="lbl">Net profit</span><span class="val '+( pnl>=0?"pos":"neg")+'">'+pnl.toLocaleString()+"M</span></div>";');
+  w.document.write('if(a.eps)html+='<div class="row"><span class="lbl">EPS</span><span class="val">'+a.eps+"</span></div>";');
+  w.document.write('if(a.roe_pct)html+='<div class="row"><span class="lbl">ROE</span><span class="val">'+a.roe_pct+"%</span></div>";');
+  w.document.write('if(q.length){html+='<div style="font-size:10px;color:#4a5a72;margin:8px 0 4px;text-transform:uppercase;letter-spacing:.7px">Quarterly</div>';');
+  w.document.write('html+='<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="color:#4a5a72"><th style="text-align:left;padding:3px">Period</th><th style="text-align:right;padding:3px">Rev M</th><th style="text-align:right;padding:3px">P&L M</th><th style="text-align:right;padding:3px">YoY</th></tr></thead><tbody>';');
+  w.document.write('q.slice(0,3).forEach(qr=>{var p=qr.net_profit_m||-(qr.net_loss_m||0)||0;');
+  w.document.write('html+='<tr><td style="padding:3px;color:#8b9ab5">'+qr.period+'</td><td style="padding:3px;text-align:right;font-family:monospace">'+( qr.revenue_m?qr.revenue_m.toLocaleString():"&mdash;")+'</td><td style="padding:3px;text-align:right;font-family:monospace;color:'+( p>=0?"#00e87a":"#ff3d5a")+'">'+p.toLocaleString()+'</td><td style="padding:3px;text-align:right;font-family:monospace;color:'+( (qr.yoy_pct||0)>0?"#00e87a":(qr.yoy_pct||0)<0?"#ff3d5a":"#4a5a72")+'">'+( qr.yoy_pct!=null?(qr.yoy_pct>0?"+":"")+qr.yoy_pct.toFixed(1)+"%":"&mdash;")+'</td></tr>';');
+  w.document.write('});html+="</tbody></table>";}');
+  w.document.write('if(co.next_earnings)html+='<div style="margin-top:8px;padding:5px 8px;background:rgba(245,197,24,.04);border:1px solid rgba(245,197,24,.12);border-radius:8px;font-size:10px"><span style="color:#f5c518">&#9200; Next: </span><span style="font-family:monospace;color:#f5c518">'+co.next_earnings+'</span><span style="color:#4a5a72;margin-left:4px">'+( co.next_earnings_period||"")+'</span></div>';');
+  w.document.write('html+="</div>";});c.innerHTML=html;');
+  }
+  w.document.write('});}).catch(e=>{document.getElementById("content").innerHTML='<span style="color:#ff3d5a">Error: '+e.message+'</span>';});');
+  w.document.write('</script></body></html>');
+  w.document.close();
+};
+</script>
 </body>
 </html>
