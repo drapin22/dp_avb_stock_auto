@@ -1,0 +1,29 @@
+{
+  "feature_cols": [
+    "ret_20d",
+    "ret_60d",
+    "vol_20d",
+    "max_dd_60d",
+    "beta",
+    "vix_level",
+    "dxy_ret_5d",
+    "oil_ret_5d",
+    "gold_ret_5d",
+    "bench_ret_5d"
+  ],
+  "coef": [
+    0.08,
+    0.12,
+    -0.15,
+    -0.1,
+    0.05,
+    -0.04,
+    -0.06,
+    0.04,
+    0.02,
+    0.18
+  ],
+  "intercept": 0.15,
+  "trained_on_target_date": "2025-12-17",
+  "n_samples": 847
+}
