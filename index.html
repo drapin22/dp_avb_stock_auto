@@ -142,6 +142,21 @@ textarea{resize:vertical;min-height:55px}
 .tst{position:fixed;bottom:18px;right:18px;background:#229ED9;color:#fff;font-family:'DM Mono',monospace;font-size:10px;padding:10px 14px;border-radius:5px;z-index:9999;display:none;align-items:center;gap:7px;box-shadow:0 4px 20px rgba(0,0,0,.4);max-width:260px}
 footer{border-top:1px solid var(--b);padding:12px 0;font-family:'DM Mono',monospace;font-size:9px;color:var(--m);letter-spacing:1px;display:flex;justify-content:space-between;margin-top:16px}
 @media(max-width:900px){.g2{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)}.sg{grid-template-columns:1fr 1fr}}
+
+.heatmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(75px,1fr));gap:7px;padding:14px}
+.hm-cell{border-radius:8px;padding:9px 6px;text-align:center;cursor:pointer;transition:all .2s;border:1px solid transparent}
+.hm-cell:hover{transform:scale(1.06);border-color:rgba(255,255,255,.25)}
+.hm-tk{font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:1px}
+.hm-er{font-family:'DM Mono',monospace;font-size:9px;font-weight:700;margin-top:2px}
+.hm-rg{font-size:7px;font-family:'DM Mono',monospace;margin-top:1px;opacity:.7}
+.insight-card{background:linear-gradient(135deg,rgba(0,255,136,.05),rgba(0,180,255,.03));border:1px solid rgba(0,255,136,.15);border-radius:10px;padding:13px;margin-bottom:10px}
+.insight-hdr{font-family:'Bebas Neue',sans-serif;font-size:12px;letter-spacing:2px;color:var(--a);margin-bottom:7px;display:flex;align-items:center;gap:6px}
+.insight-txt{font-size:11px;color:rgba(232,237,244,.75);font-family:'DM Mono',monospace;line-height:1.65}
+.perf-row{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.perf-label{font-family:'DM Mono',monospace;font-size:9px;color:var(--t);width:60px;text-align:right}
+.perf-track{flex:1;max-width:140px;height:16px;background:rgba(255,255,255,.04);border-radius:3px;overflow:hidden}
+.perf-bar{height:100%;border-radius:3px;opacity:.85;transition:width 1s ease}
+.perf-meta{font-family:'DM Mono',monospace;font-size:8px;color:var(--m)}
 </style>
 </head>
 <body>
@@ -177,6 +192,7 @@ footer{border-top:1px solid var(--b);padding:12px 0;font-family:'DM Mono',monosp
 <div class="tape" id="tape"><div class="ti" id="tapeIn"></div></div>
 <div class="tabs">
   <div class="tab on" onclick="tab('f')">📊 FORECASTS</div>
+  <div class="tab" onclick="tab('h')">🔥 HEATMAP</div>
   <div class="tab" onclick="tab('a')">🔍 AI ANALYZER</div>
   <div class="tab" onclick="tab('h')">📈 HISTORY</div>
   <div class="tab" onclick="tab('i')">🚀 IPO RADAR</div>
@@ -213,12 +229,29 @@ footer{border-top:1px solid var(--b);padding:12px 0;font-family:'DM Mono',monosp
       </div>
     </div>
     <div>
-      <div class="pn"><div class="ph"><span class="pt">YOUR PORTFOLIO</span></div><div id="portList"></div></div>
+      <div class="pn"><div class="ph"><span class="pt">YOUR PORTFOLIO</span></div><div       <div class="insight-card" id="aiInsightCard" style="display:none">
+        <div class="insight-hdr">🧠 AI MARKET PULSE</div>
+        <div class="insight-txt" id="aiInsightText">Generating...</div>
+      </div>
+id="portList"></div></div>
     </div>
   </div>
 </div>
 
 <!-- ANALYZE TAB -->
+
+<!-- ── TAB: HEATMAP ── -->
+<div class="tc" id="t-h">
+  <div class="pn">
+    <div class="ph"><span class="pt">SIGNAL HEATMAP — ALL TICKERS</span><span class="ptg">VISUAL</span></div>
+    <div id="heatmap"></div>
+  </div>
+  <div class="pn" style="margin-top:12px">
+    <div class="ph"><span class="pt">SIGNAL FREQUENCY — HISTORICAL APPEARANCES</span></div>
+    <div id="perfChart" style="padding:16px"></div>
+  </div>
+</div>
+
 <div class="tc" id="t-a">
   <div class="g2">
     <div>
@@ -624,6 +657,62 @@ async function buildStrat(){
     out.innerHTML=d.content?.map(b=>b.text||'').join('')||'Failed.';
   }catch(e){out.innerHTML='<span style="color:var(--r)">Error: '+e.message+'</span>'}
 }
+
+// ── HEATMAP ──────────────────────────────────────────────────────────
+function renderHeatmap(){
+  const PTKS=[{t:'TLV',r:'RO'},{t:'SNN',r:'RO'},{t:'SNP',r:'RO'},{t:'FP',r:'RO'},{t:'WINE',r:'RO'},{t:'H2O',r:'RO'},{t:'AROBS',r:'RO'},{t:'AQ',r:'RO'},{t:'EL',r:'RO'},{t:'AG',r:'RO'},{t:'TRP',r:'RO'},{t:'ALR',r:'RO'},{t:'GSH',r:'RO'},{t:'HAI',r:'RO'},{t:'NRF',r:'RO'},{t:'BABA',r:'US'},{t:'NIO',r:'US'},{t:'PATH',r:'US'},{t:'JD',r:'US'},{t:'NVDA',r:'US'},{t:'BATE.DE',r:'EU'},{t:'LHA.DE',r:'EU'}];
+  const all=PTKS.map(({t,r})=>{const fc=latD.find(f=>f.Ticker===t)||{er:0,sc:0,Region:r};return{Ticker:t,Region:r,er:fc.er||0,sc:fc.sc||0};});
+  const maxAbs=Math.max(...all.map(r=>Math.abs(r.er)),0.5);
+  const hm=document.getElementById('heatmap');
+  if(!hm)return;
+  hm.innerHTML='<div class="heatmap">'+all.map(r=>{
+    const n=r.er/maxAbs;
+    const bg=r.er>0?`rgba(0,255,136,${Math.min(Math.abs(n)*.65+.07,.72)})`:r.er<0?`rgba(255,58,92,${Math.min(Math.abs(n)*.65+.07,.72)})`:'rgba(255,255,255,.04)';
+    const tc=Math.abs(n)>0.45?'#000':'var(--t)';
+    const ec=r.er>0?'#00ff88':r.er<0?'#ff3a5c':'#6b7585';
+    return `<div class="hm-cell" style="background:${bg}" onclick="qa('${r.Ticker}','${r.Region}',${r.er},${r.sc})">
+      <div class="hm-tk" style="color:${tc}">${r.Ticker}</div>
+      <div class="hm-er" style="color:${ec}">${r.er>0?'+':''}${r.er.toFixed(2)}%</div>
+      <div class="hm-rg" style="color:${tc};opacity:.7">${r.Region}</div>
+    </div>`;
+  }).join('')+'</div>';
+  // Frequency chart
+  const byT={};
+  allD.filter(r=>r.Ticker&&Math.abs(r.er)>0.01).forEach(r=>{if(!byT[r.Ticker])byT[r.Ticker]=[];byT[r.Ticker].push(r.er);});
+  const top=Object.entries(byT).sort((a,b)=>b[1].length-a[1].length).slice(0,8);
+  const maxLen=top[0]?.[1].length||1;
+  const cols=['#00ff88','#00b4ff','#f5c518','#a78bfa','#ff6b35','#ff3a5c','#00e5ff','#69ff47'];
+  const pc=document.getElementById('perfChart');
+  if(!pc)return;
+  if(!top.length){pc.innerHTML='<div class="aph"><span class="ic">📈</span>No historical signal data yet</div>';return;}
+  pc.innerHTML='<div style="font-family:DM Mono,monospace;font-size:9px;color:var(--m);margin-bottom:10px;letter-spacing:1px;text-transform:uppercase">Signal frequency by ticker (non-zero historical appearances)</div>'+
+    top.map(([t,vals],i)=>{
+      const avg=(vals.reduce((s,v)=>s+v,0)/vals.length).toFixed(2);
+      const w=Math.round((vals.length/maxLen)*140);
+      return `<div class="perf-row"><div class="perf-label">${t}</div><div class="perf-track"><div class="perf-bar" style="width:${w}px;background:${cols[i%8]}"></div></div><div class="perf-meta">${vals.length}x · avg ${avg>0?'+':''}${avg}%</div></div>`;
+    }).join('');
+}
+
+// ── AI MARKET PULSE ───────────────────────────────────────────────────
+async function generateMarketPulse(topSignals){
+  const{ak}=cfg();
+  const card=document.getElementById('aiInsightCard');
+  const txt=document.getElementById('aiInsightText');
+  if(!ak||!topSignals.length||!card||!txt)return;
+  card.style.display='block';
+  txt.innerHTML='<span style="opacity:.5">Generating pulse...</span>';
+  try{
+    const lines=topSignals.map(r=>`${r.Ticker}(${r.Region}):${r.er>0?'+':''}${r.er.toFixed(2)}%`).join(', ');
+    const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01'},body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',max_tokens:160,
+      system:'StockD APEX. Give a 2-sentence sharp market insight for a Romanian retail investor ($1000). Plain text, no markdown, no emojis. Specific and actionable.',
+      messages:[{role:'user',content:`Signals: ${lines}. What is the #1 insight this week?`}]
+    })});
+    const d=await r.json();
+    txt.textContent=d.content?.map(b=>b.text||'').join('')||'Analysis unavailable.';
+  }catch(e){card.style.display='none';}
+}
+
 </script>
 </body>
 </html>
