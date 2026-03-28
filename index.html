@@ -467,10 +467,11 @@ footer { border-top:1px solid var(--border); padding:16px 0; font-family:'DM Mon
 <script>
 // ── CONFIG ────────────────────────────────────────────────
 const CLAUDE_API = 'https://api.anthropic.com/v1/messages';
-const TG_TOKEN   = '8547164655:AAE1nNEaWPWgVmHz4ZHsnELFyzaQf9Ljvug';
-const TG_CHAT    = '8194583452';
+const ANTHROPIC_KEY = localStorage.getItem('apex_anthropic_key')||'';
+const TG_TOKEN = localStorage.getItem('apex_tg_token')||'';
+const TG_CHAT  = localStorage.getItem('apex_tg_chat')||'';
 const GITHUB_RAW = 'https://raw.githubusercontent.com/drapin22/dp_avb_stock_auto/main';
-const GH_TOKEN   = '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';
+// GH_TOKEN removed (repo is public)
 let analyzedCount = 0;
 let lastAnalysis = '';
 let lastTicker = '';
