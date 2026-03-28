@@ -47,10 +47,17 @@ def _download_close(ticker: str, start: datetime, end: datetime) -> Optional[pd.
         df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
         if df is None or df.empty:
             return None
+        # yfinance >=0.2 returns MultiIndex columns — flatten them first
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         col = "Close" if "Close" in df.columns else ("Adj Close" if "Adj Close" in df.columns else None)
         if col is None:
             return None
-        s = df[col].dropna()
+        s = df[col]
+        # If still a DataFrame (can happen with multi-ticker downloads), take first column
+        if isinstance(s, pd.DataFrame):
+            s = s.iloc[:, 0]
+        s = pd.to_numeric(s, errors="coerce").dropna()
         s.index = pd.to_datetime(s.index, errors="coerce")
         s = s.dropna()
         return s if not s.empty else None
