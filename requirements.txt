@@ -7,3 +7,6 @@ openai>=1.55.0
 python-dateutil
 matplotlib
 feedparser
+numpy
+scikit-learn
+xgboost
