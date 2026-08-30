@@ -1,0 +1,22 @@
+Date,WeekStart,TargetDate,ModelVersion,Ticker,Region,HorizonDays,ER_Pct,Notes,Adj_ER_Pct,EngineStatus,CalibApplied,CalibReason,LastError,RankSignal,score_0_100,confidence_tier,AdjERPct,Reliability,VolScale
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,WINE,RO,5,-0.1471,weekly auto-forecast,-0.3606,OK,yes,ridge+calib+reliability+regime,,,45.3,MEDIUM,-0.3606,0.453,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,EL,RO,5,1.9857,weekly auto-forecast,4.5,OK,yes,ridge+calib+reliability+regime,,,49.0,MEDIUM,4.5,0.49,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,AG,RO,5,1.2389,weekly auto-forecast,2.9743,OK,yes,ridge+calib+reliability+regime,,,46.3,MEDIUM,2.9743,0.463,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,H2O,RO,5,1.0328,weekly auto-forecast,3.1451,OK,yes,ridge+calib+reliability+regime,,,48.6,MEDIUM,3.1451,0.486,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,SNN,RO,5,0.5831,weekly auto-forecast,1.8057,OK,yes,ridge+calib+reliability+regime,,,47.8,MEDIUM,1.8057,0.478,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,AQ,RO,5,1.8995,weekly auto-forecast,4.5,OK,yes,ridge+calib+reliability+regime,,,46.9,MEDIUM,4.5,0.469,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,SNP,RO,5,2.1987,weekly auto-forecast,4.5,OK,yes,ridge+calib+reliability+regime,,,54.3,MEDIUM,4.5,0.543,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,TRP,RO,5,0.2269,weekly auto-forecast,0.7388,OK,yes,ridge+calib+reliability+regime,,,45.5,MEDIUM,0.7388,0.455,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,AROBS,RO,5,1.0148,weekly auto-forecast,2.4374,OK,yes,ridge+calib+reliability+regime,,,46.3,MEDIUM,2.4374,0.463,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,FP,RO,5,0.7047,weekly auto-forecast,2.2066,OK,yes,ridge+calib+reliability+regime,,,47.3,MEDIUM,2.2066,0.473,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,TLV,RO,5,1.6699,weekly auto-forecast,3.7109,OK,yes,ridge+calib+reliability+regime,,,50.0,MEDIUM,3.7109,0.5,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,ALR,RO,5,0.4276,weekly auto-forecast,1.0304,OK,yes,ridge+calib+reliability+regime,,,46.1,MEDIUM,1.0304,0.461,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,GSH,RO,5,0.8018,weekly auto-forecast,3.6846,OK,yes,ridge+calib+reliability+regime,,,32.2,LOW,3.6846,0.322,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,HAI,RO,5,0.5667,weekly auto-forecast,1.8522,OK,yes,ridge+calib+reliability+regime,,,45.3,MEDIUM,1.8522,0.453,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,NRF,RO,5,1.5046,weekly auto-forecast,3.5676,OK,yes,ridge+calib+reliability+regime,,,46.9,MEDIUM,3.5676,0.469,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,BATE.DE,EU,5,1.2925,weekly auto-forecast,4.0,OK,yes,ridge+calib+reliability+regime,,,47.9,MEDIUM,4.0,0.479,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,LHA.DE,EU,5,1.2747,weekly auto-forecast,4.0,OK,yes,ridge+calib+reliability+regime,,,47.2,MEDIUM,4.0,0.472,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,BABA,US,5,-0.081,weekly auto-forecast,-0.2182,OK,yes,ridge+calib+reliability+regime,,,41.3,LOW,-0.2182,0.413,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,JD,US,5,1.6538,weekly auto-forecast,5.0,OK,yes,ridge+calib+reliability+regime,,,49.0,MEDIUM,5.0,0.49,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,NIO,US,5,0.2552,weekly auto-forecast,0.8444,OK,yes,ridge+calib+reliability+regime,,,44.8,LOW,0.8444,0.448,1.0
+2026-08-30,2026-08-31,2026-09-04,StockD_V11.0,PATH,US,5,-1.9993,weekly auto-forecast,-5.0,OK,yes,ridge+calib+reliability+regime,,,44.4,LOW,-5.0,0.444,1.0
